@@ -10,8 +10,8 @@ Facts vs prose
 --------------
 Every FACT in a report is computed deterministically from the stored AttackCase, AttackRun and JudgeVerdict:
 severity, category, owasp, repro_case_id, repro_steps, observed_behavior, expected_behavior and the
-first/last seen versions. The router (any object with ``complete(prompt) -> result``, where the result is a
-str, a dict with "text", or an object with ``.text``) may only draft the three PROSE fields: title,
+first/last seen versions. The router (aep.models.router, or any object with ``for_agent(agent, messages) -> result``,
+where the result is an LLMResult, a str, a dict with "text", or an object with ``.text``) may only draft the three PROSE fields: title,
 clinical_impact and recommended_remediation. Each drafted field is checked against the evidence. If it names
 an identifier the evidence does not contain (patient UUID, canary, snake_case tool name, endpoint path,
 SHA-like hex, platform id, decimal value), that field falls back to the deterministic template. So the router
@@ -105,7 +105,7 @@ class DataQualityError(DocumentationError):
 
 
 class DraftRouter(Protocol):
-    def complete(self, prompt: str) -> Any: ...
+    def for_agent(self, agent: str, messages: list[dict], **kwargs: Any) -> Any: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -611,7 +611,8 @@ class Documentation:
             json.dumps(facts, default=str), json.dumps(prose),
         ])
         try:
-            result = self.router.complete(_ROUTER_PROMPT.format(facts=json.dumps(facts, indent=2, default=str)))
+            prompt = _ROUTER_PROMPT.format(facts=json.dumps(facts, indent=2, default=str))
+            result = self.router.for_agent("documentation", [{"role": "user", "content": prompt}])
             if span is not None:
                 span.record_llm(result)
             draft = _parse_json_object(_result_text(result))

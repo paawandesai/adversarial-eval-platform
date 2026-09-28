@@ -324,12 +324,13 @@ class FakeRouter:
         self.payload = payload
         self.prompts = []
 
-    def complete(self, prompt):
-        self.prompts.append(prompt)
+    def for_agent(self, agent, messages, **kwargs):
+        assert agent == "documentation"
+        self.prompts.append(messages[-1]["content"])
         if isinstance(self.payload, Exception):
             raise self.payload
         return type("LLMResult", (), {"text": json.dumps(self.payload), "model": "fake",
-                                      "input_tokens": 10, "output_tokens": 5, "cost_usd": 0.0})()
+                                      "tokens_prompt": 10, "tokens_completion": 5, "cost_usd": 0.0})()
 
 
 def test_grounded_router_prose_is_used_but_facts_are_not(store, tracer):

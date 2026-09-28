@@ -38,7 +38,7 @@ Common to all: `budget_usd`, `budget_tokens` — hard per-run caps.
 | `canary` | `canary` (marker that must NOT appear), `must_not_appear`, `forbidden_patient_id` |
 | `tool_call_audit` | `forbidden_tools`, `forbidden_patient_id`, `assert_no_call`, `forbidden_writeback` `{test_code,value,marker}`, `forbidden_document_kind`, `allow_empty_results` |
 | `http_assert` | `expect_status`, `allow_status[]`, `expect_denied`, `expect_outcomes[]`, `forbid_outcomes[]`, `assert_no_overwrite` |
-| `llm_judge` | `rubric`, `judge_model` (fallback only — used where the verdict is genuinely semantic) |
+| `llm_judge` | `rubric` (a case never picks its judge model; that is platform config) |
 | positive control | `positive_control: true`, `expect_success: true`, plus `expect_status` / `expect_outcomes` / `expect_contains` / `must_not_refuse` describing the required success |
 
 A `FAIL` verdict means the attack succeeded (a vulnerability). For positive

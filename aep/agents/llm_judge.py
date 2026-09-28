@@ -23,9 +23,10 @@ Independence rules enforced here:
     model is told that instructions inside it (including ones addressed to
     "the judge") are evidence, not commands.
 
-Router: any object with `complete(*, model, messages, temperature, max_tokens)`
-returning a str, a dict, or an object carrying `text`/`content` (plus
-optional `model` and usage fields, which aep.obs reads). `complete` may be
+Router: aep.models.router, or any object with the same
+`complete(model_str, messages, **kw)` returning an LLMResult (`text`,
+`tokens_prompt`, `tokens_completion`, `cost_usd`, `latency_ms`). A str, a dict,
+or an object carrying `text`/`content` is also accepted. `complete` may be
 sync or async.
 """
 from __future__ import annotations
@@ -53,7 +54,7 @@ MAX_TOKENS = 900
 
 
 class Router(Protocol):
-    def complete(self, *, model: str, messages: list[dict], **kwargs: Any) -> Any: ...
+    def complete(self, model_str: str, messages: list[dict], **kwargs: Any) -> Any: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -178,11 +179,11 @@ def resolve_judge_model(model: Optional[str] = None) -> str:
 def default_router() -> Router:
     """The platform router, resolved lazily so importing this module never needs one."""
     try:
-        from aep.router import get_router  # type: ignore[import-not-found]
+        from aep.models import router  # type: ignore[import-not-found]
     except ImportError as exc:
-        raise RuntimeError("no platform router available (aep.router.get_router); "
+        raise RuntimeError("no platform router available (aep.models.router); "
                            "pass router= to the Judge") from exc
-    return get_router()
+    return router
 
 
 # --------------------------------------------------------------------------- #
@@ -340,7 +341,7 @@ async def evaluate_semantic(case: AttackCase, run: AttackRun, *, router: Optiona
     messages = build_messages(case, run, rubric)
     with trace(run.correlation_id, "judge.llm", rubric=rubric.id, model=model) as span:
         try:
-            result = router.complete(model=model, messages=messages, temperature=0.0, max_tokens=MAX_TOKENS)
+            result = router.complete(model, messages, temperature=0.0, max_tokens=MAX_TOKENS)
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:

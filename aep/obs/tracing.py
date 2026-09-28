@@ -41,8 +41,9 @@ log = logging.getLogger("aep.obs")
 
 _current: contextvars.ContextVar[Optional["Span"]] = contextvars.ContextVar("obs_span", default=None)
 
-_INPUT_KEYS = ("input_tokens", "prompt_tokens", "tokens_prompt", "tokens_in")
-_OUTPUT_KEYS = ("output_tokens", "completion_tokens", "tokens_completion", "tokens_out")
+# LLMResult (aep.models.router) names first; the rest are aliases for other result shapes.
+_INPUT_KEYS = ("tokens_prompt", "input_tokens", "prompt_tokens", "tokens_in")
+_OUTPUT_KEYS = ("tokens_completion", "output_tokens", "completion_tokens", "tokens_out")
 _COST_KEYS = ("cost_usd", "cost", "total_cost")
 
 

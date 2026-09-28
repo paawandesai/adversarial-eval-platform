@@ -92,10 +92,10 @@ class FakeRouter:
 
     def _result(self, messages):
         text = self.reply(messages) if callable(self.reply) else self.reply
-        return {"text": text, "model": self.model, "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0001}
+        return {"text": text, "model": self.model, "tokens_prompt": 100, "tokens_completion": 20, "cost_usd": 0.0001}
 
-    def complete(self, *, model, messages, **kwargs):
-        self.calls.append({"model": model, "messages": messages, **kwargs})
+    def complete(self, model_str, messages, **kwargs):
+        self.calls.append({"model": model_str, "messages": messages, **kwargs})
         if self.is_async:
             async def _coro():
                 return self._result(messages)

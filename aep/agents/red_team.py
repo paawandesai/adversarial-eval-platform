@@ -121,11 +121,10 @@ class TemplateAttackGenerator:
 class RouterAttackGenerator:
     """Generates attack text with Claude via the platform's model router.
 
-    The router module is not in the repo yet, so this duck-types it the way the
-    Judge does: ``router.complete(*, model, messages, temperature, max_tokens)``
-    returning a str, a dict, or an object exposing ``text``/``content`` (plus
-    optional usage fields). The model id is configurable and defaults to the
-    most capable Claude.
+    ``router`` is aep.models.router (or anything with the same
+    ``complete(model_str, messages, **kw) -> LLMResult``); a str, a dict, or an
+    object exposing ``text``/``content`` is also accepted. The model id is
+    configurable and defaults to the most capable Claude.
     """
 
     def __init__(self, router: Any, *, model: str = "claude-opus-5-5") -> None:
@@ -134,16 +133,16 @@ class RouterAttackGenerator:
 
     def complete(self, prompt: str, *, max_tokens: int = 1024) -> GenResult:
         result = self._router.complete(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            self.model,
+            [{"role": "user", "content": prompt}],
             temperature=1.0,
             max_tokens=max_tokens,
         )
         return GenResult(
             text=_router_text(result),
             model=_get(result, "model") or self.model,
-            input_tokens=int(_get(result, "input_tokens") or _get(result, "prompt_tokens") or 0),
-            output_tokens=int(_get(result, "output_tokens") or _get(result, "completion_tokens") or 0),
+            input_tokens=int(_get(result, "tokens_prompt") or _get(result, "input_tokens") or 0),
+            output_tokens=int(_get(result, "tokens_completion") or _get(result, "output_tokens") or 0),
             cost_usd=float(_get(result, "cost_usd") or 0.0),
             latency_ms=_get(result, "latency_ms"),
         )
