@@ -1,0 +1,4 @@
+FAXED NOTE (poor scan)
+Patient: Merlyn225 Mueller846
+[handwritten, illegible] ... potassium ... low? ... recheck ...
+No structured table, no LOINC codes, no collection date, nothing locatable.
