@@ -446,8 +446,12 @@ def for_agent(agent: str, messages: list[dict], **kw: Any) -> LLMResult:
     return get_router().for_agent(agent, messages, **kw)
 
 
+def resolve_agent(agent: str) -> tuple[tuple[str, str], Optional[tuple[str, str]]]:
+    return get_router().resolve_agent(agent)
+
+
 __all__ = [
     "AGENT_ROUTES", "PRICES", "ConfigError", "JudgeIndependenceError", "LLMResult", "ProviderError",
     "Route", "Router", "RouterError", "complete", "for_agent", "get_router", "is_claude_family",
-    "parse_model", "price_per_mtok", "set_router",
+    "parse_model", "price_per_mtok", "resolve_agent", "set_router",
 ]

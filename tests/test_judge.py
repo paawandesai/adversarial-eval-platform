@@ -94,8 +94,15 @@ class FakeRouter:
         text = self.reply(messages) if callable(self.reply) else self.reply
         return {"text": text, "model": self.model, "tokens_prompt": 100, "tokens_completion": 20, "cost_usd": 0.0001}
 
+    def for_agent(self, agent, messages, **kwargs):
+        return self._reply({"agent": agent, "messages": messages, **kwargs})
+
     def complete(self, model_str, messages, **kwargs):
-        self.calls.append({"model": model_str, "messages": messages, **kwargs})
+        return self._reply({"model": model_str, "messages": messages, **kwargs})
+
+    def _reply(self, call):
+        self.calls.append(call)
+        messages = call["messages"]
         if self.is_async:
             async def _coro():
                 return self._result(messages)
@@ -149,7 +156,6 @@ class TestDeterministicFirst:
 
         v = run_async(judge.evaluate(run))
 
-        router.complete.assert_not_called()
         assert not router.method_calls
         assert v.verdict == Verdict.FAIL
         assert v.oracle_used == OracleType.CANARY
@@ -163,7 +169,7 @@ class TestDeterministicFirst:
         router = MagicMock()
         judge = judge_for(store, case, router=router, audit_reader=NoAudit())
         v = run_async(judge.evaluate(make_run(case, [("user", "x"), ("assistant", "I can't share that.")])))
-        router.complete.assert_not_called()
+        assert not router.method_calls
         assert v.verdict == Verdict.PASS
 
     def test_tool_call_audit_uses_audit_records(self, store):
@@ -179,7 +185,7 @@ class TestDeterministicFirst:
 
         v = run_async(judge.evaluate(run))
 
-        router.complete.assert_not_called()
+        assert not router.method_calls
         assert audit.calls == [run.correlation_id]
         assert v.verdict == Verdict.FAIL
         assert v.oracle_evidence["source"] == "audit"
@@ -191,7 +197,7 @@ class TestDeterministicFirst:
         router = MagicMock()
         judge = judge_for(store, case, router=router)
         v = run_async(judge.evaluate(make_run(case, [("assistant", "hi")])))
-        router.complete.assert_not_called()
+        assert not router.method_calls
         assert v.verdict == Verdict.ERROR
 
 
@@ -209,7 +215,7 @@ class TestSemanticRouting:
 
         assert len(router.calls) == 1
         call = router.calls[0]
-        assert call["model"] == "deepseek-chat"          # the Judge's model, not the case's Claude request
+        assert call["agent"] == "judge"                 # routed by JUDGE_MODEL, not the case's Claude request
         assert call["temperature"] == 0.0
         assert v.oracle_used == OracleType.LLM_JUDGE
         assert v.verdict == Verdict.FAIL
@@ -282,7 +288,7 @@ class TestSemanticRouting:
     def test_router_exception_is_error(self, store):
         case = persona_case()
         router = MagicMock()
-        router.complete.side_effect = TimeoutError("upstream")
+        router.for_agent.side_effect = TimeoutError("upstream")
         judge = judge_for(store, case, router=router)
         v = run_async(judge.evaluate(make_run(case, [("assistant", "No.")])))
         assert v.verdict == Verdict.ERROR
@@ -306,6 +312,48 @@ class TestSemanticRouting:
         none = make_case(OracleType.LLM_JUDGE, {}, category=AttackCategory.SSRF_VIA_DOCUMENT)
         v = run_async(evaluate_semantic(none, make_run(none, [("assistant", "x")]), router=MagicMock()))
         assert v.verdict == Verdict.ERROR and "no rubric" in v.oracle_evidence["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Model selection: JUDGE_MODEL through the real router, or a pinned model
+# --------------------------------------------------------------------------- #
+class TestJudgeModelRouting:
+    @staticmethod
+    def deepseek_router(reply: str):
+        import httpx
+        from aep.models.router import Router
+
+        bodies = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={
+                "model": bodies[-1]["model"],
+                "choices": [{"message": {"role": "assistant", "content": reply}}],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 10},
+            })
+        return Router(http=httpx.Client(transport=httpx.MockTransport(handler))), bodies
+
+    def test_judge_model_env_is_honoured(self, store, monkeypatch):
+        monkeypatch.setenv("JUDGE_MODEL", "deepseek:deepseek-reasoner")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek")
+        router, bodies = self.deepseek_router(answer("persona_hijack"))
+        case = persona_case()
+        v = run_async(judge_for(store, case, router=router).evaluate(make_run(case, [("assistant", "No.")])))
+        assert [b["model"] for b in bodies] == ["deepseek-reasoner"]
+        assert v.verdict == Verdict.PASS and v.judge_model == "deepseek-reasoner"
+
+    def test_pinned_model_bypasses_env_routing(self, store):
+        case = persona_case()
+        router = FakeRouter(answer("persona_hijack"))
+        run_async(judge_for(store, case, router=router, judge_model="deepseek-chat").evaluate(
+            make_run(case, [("assistant", "No.")])))
+        assert router.calls[0]["model"] == "deepseek-chat" and "agent" not in router.calls[0]
+
+    def test_claude_judge_model_env_rejected(self, store, monkeypatch):
+        monkeypatch.setenv("JUDGE_MODEL", "anthropic:claude-opus-5-5")
+        with pytest.raises(ValueError, match="independent"):
+            Judge(store)
 
 
 # --------------------------------------------------------------------------- #
@@ -429,7 +477,7 @@ class TestGolden:
         router = perfect_router(items)
         assert score_judge(router) == 1.0
         assert len(router.calls) == len(items)
-        assert all(c["model"] == "deepseek-chat" for c in router.calls)
+        assert all(c["agent"] == "judge" for c in router.calls)
 
     def test_flipped_label_drops_score(self, tmp_path):
         items = load_golden()

@@ -64,6 +64,7 @@ class Judge:
         self.store = store
         self._router = router
         self.judge_model = llm_judge.resolve_judge_model(judge_model)  # rejects a Claude judge up front
+        self._pinned_model = judge_model  # None: the router picks by JUDGE_MODEL
         self._audit_reader = audit_reader
         self._audit_reader_factory = audit_reader_factory
         self.confidence_threshold = confidence_threshold
@@ -81,7 +82,7 @@ class Judge:
                 verdict = _with_evidence(verdict, audit=audit_status)
             else:
                 router = self._router if self._router is not None else llm_judge.default_router()
-                verdict = await llm_judge.evaluate_semantic(case, run, router=router, model=self.judge_model)
+                verdict = await llm_judge.evaluate_semantic(case, run, router=router, model=self._pinned_model)
                 verdict = self._gate(verdict, run)
 
             self.store.add_verdict(verdict)

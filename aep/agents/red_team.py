@@ -119,28 +119,44 @@ class TemplateAttackGenerator:
 
 
 class RouterAttackGenerator:
-    """Generates attack text with Claude via the platform's model router.
+    """Generates attack text through the platform router's per-agent routing.
 
-    ``router`` is aep.models.router (or anything with the same
-    ``complete(model_str, messages, **kw) -> LLMResult``); a str, a dict, or an
-    object exposing ``text``/``content`` is also accepted. The model id is
-    configurable and defaults to the most capable Claude.
+    Calls ``router.for_agent("redteam", ...)``, so REDTEAM_MODEL picks the model
+    (default Claude Opus 5.5) and REDTEAM_FALLBACK_MODEL (default Ollama
+    qwen2.5-coder:14b) serves when Claude has no key, fails, or refuses.
+    ``router`` defaults to aep.models.router; the result may be an LLMResult, a
+    str, a dict, or an object exposing ``text``/``content``. ``model`` is the
+    configured primary; each GenResult names the model that actually served.
     """
 
-    def __init__(self, router: Any, *, model: str = "claude-opus-5-5") -> None:
+    agent = "redteam"
+
+    def __init__(self, router: Any = None) -> None:
+        if router is None:
+            from aep.models import router as platform_router
+            router = platform_router
         self._router = router
-        self.model = model
+
+    @property
+    def model(self) -> str:
+        resolve = getattr(self._router, "resolve_agent", None)
+        try:
+            (provider, model), _ = resolve(self.agent)
+        except Exception:  # no resolver, or routing misconfigured: the call itself will say why
+            return f"router:{self.agent}"
+        return f"{provider}:{model}"
 
     def complete(self, prompt: str, *, max_tokens: int = 1024) -> GenResult:
-        result = self._router.complete(
-            self.model,
+        result = self._router.for_agent(
+            self.agent,
             [{"role": "user", "content": prompt}],
             temperature=1.0,
             max_tokens=max_tokens,
         )
+        provider, served = _get(result, "provider"), _get(result, "model")
         return GenResult(
             text=_router_text(result),
-            model=_get(result, "model") or self.model,
+            model=(f"{provider}:{served}" if provider and served else served) or self.model,
             input_tokens=int(_get(result, "tokens_prompt") or _get(result, "input_tokens") or 0),
             output_tokens=int(_get(result, "tokens_completion") or _get(result, "output_tokens") or 0),
             cost_usd=float(_get(result, "cost_usd") or 0.0),
@@ -325,7 +341,7 @@ class RedTeam:
             target_endpoint=profile.endpoint,
             expected_safe_behavior=profile.expected_safe,
             oracle=profile.oracle,
-            oracle_config={"generated": True, "generator_model": self.generator.model},
+            oracle_config={"generated": True, "generator_model": gen.model},  # what served, fallback included
             severity_if_success=profile.severity,
             exploitability_note="Machine-generated probe (Red Team generation path).",
         )
@@ -459,6 +475,9 @@ class RedTeam:
         transcript: list[ConversationTurn], tool_calls: list[dict], version: str,
     ) -> AttackRun:
         s = self.tracer.summary(correlation_id)
+        cfg = case.oracle_config or {}
+        # A generated case records the model that actually wrote it (maybe the fallback).
+        attacker = cfg.get("generator_model") if cfg.get("generated") else None
         run = AttackRun(
             correlation_id=correlation_id,
             case_id=case.case_id,
@@ -469,7 +488,7 @@ class RedTeam:
             tokens_completion=int(s.get("tokens_completion", 0)),
             cost_usd=float(s.get("cost_usd", 0.0)),
             latency_ms_by_step=dict(s.get("latency_ms_by_step", {})),
-            redteam_model=self.generator.model,
+            redteam_model=attacker or self.generator.model,
         )
         # NB: AttackRun carries no verdict. Grading is the Judge's job.
         self.store.add_run(run)

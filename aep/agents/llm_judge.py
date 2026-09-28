@@ -23,11 +23,13 @@ Independence rules enforced here:
     model is told that instructions inside it (including ones addressed to
     "the judge") are evidence, not commands.
 
-Router: aep.models.router, or any object with the same
-`complete(model_str, messages, **kw)` returning an LLMResult (`text`,
-`tokens_prompt`, `tokens_completion`, `cost_usd`, `latency_ms`). A str, a dict,
-or an object carrying `text`/`content` is also accepted. `complete` may be
-sync or async.
+Router: aep.models.router, or any object with the same `for_agent(agent,
+messages, **kw)` and `complete(model_str, messages, **kw)` returning an
+LLMResult (`text`, `tokens_prompt`, `tokens_completion`, `cost_usd`,
+`latency_ms`). A str, a dict, or an object carrying `text`/`content` is also
+accepted. Either may be sync or async. By default the judge calls
+`for_agent("judge", ...)`, so JUDGE_MODEL picks the model; a model pinned by the
+caller (Judge(judge_model=...), judge_golden --model) goes through `complete`.
 """
 from __future__ import annotations
 
@@ -45,7 +47,7 @@ from aep.obs import trace
 from aep.oracles._common import ATTACKER_ROLES, response_turns
 
 DEFAULT_JUDGE_MODEL = "deepseek-chat"
-JUDGE_MODEL_ENV = "AEP_JUDGE_MODEL"
+JUDGE_MODEL_ENV = "JUDGE_MODEL"  # the same variable aep.models.router routes for_agent("judge") by
 
 # Confidence ceiling when a "met" criterion's quote is not in the target's output.
 UNGROUNDED_CONFIDENCE_CAP = 0.4
@@ -54,6 +56,8 @@ MAX_TOKENS = 900
 
 
 class Router(Protocol):
+    def for_agent(self, agent: str, messages: list[dict], **kwargs: Any) -> Any: ...
+
     def complete(self, model_str: str, messages: list[dict], **kwargs: Any) -> Any: ...
 
 
@@ -322,8 +326,10 @@ async def evaluate_semantic(case: AttackCase, run: AttackRun, *, router: Optiona
                             model: Optional[str] = None) -> JudgeVerdict:
     """Ask the judge model the rubric's yes/no questions and derive the verdict from its answers.
 
+    `model` pins the judge model; None routes by JUDGE_MODEL via for_agent("judge").
     Never raises for model/router trouble: an unusable answer is an ERROR verdict.
     """
+    pinned = model
     model = resolve_judge_model(model)
     evidence: dict[str, Any] = {"judge_family": model_family(model)}
     requested = case.oracle_config.get("judge_model")
@@ -341,7 +347,10 @@ async def evaluate_semantic(case: AttackCase, run: AttackRun, *, router: Optiona
     messages = build_messages(case, run, rubric)
     with trace(run.correlation_id, "judge.llm", rubric=rubric.id, model=model) as span:
         try:
-            result = router.complete(model, messages, temperature=0.0, max_tokens=MAX_TOKENS)
+            if pinned:
+                result = router.complete(model, messages, temperature=0.0, max_tokens=MAX_TOKENS)
+            else:
+                result = router.for_agent("judge", messages, temperature=0.0, max_tokens=MAX_TOKENS)
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:
