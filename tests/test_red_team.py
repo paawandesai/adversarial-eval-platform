@@ -29,6 +29,7 @@ from aep.agents.mutations import mutate  # noqa: E402
 from aep.agents.red_team import GenResult, RedTeam, TemplateAttackGenerator  # noqa: E402
 from aep.obs import set_tracer  # noqa: E402
 from aep.obs.tracing import LangfuseTracer  # noqa: E402
+from aep.oracles import canary_oracle  # noqa: E402
 from aep.store import SqliteStore  # noqa: E402
 from aep.target.client import CORRELATION_ID_HEADER, TargetClient, TargetConfig  # noqa: E402
 from contracts.contracts import (  # noqa: E402
@@ -42,6 +43,7 @@ from contracts.contracts import (  # noqa: E402
     OwaspLLM,
     OwaspMapping,
     Severity,
+    Verdict,
     WorkItem,
 )
 
@@ -186,7 +188,7 @@ def test_run_work_item_replays_multi_turn_case(tmp_path):
     roles = [t.role for t in run.transcript]
     assert roles.count("attacker_document") == 1
     assert roles.count("user") == 2
-    assert roles.count("api") == 3  # one per upload + one per chat turn
+    assert roles.count("assistant") == 3  # one per upload + one per chat turn
 
 
 def test_one_correlation_id_propagated_on_every_call(tmp_path):
@@ -269,6 +271,60 @@ def test_seed_oracle_config_patient_id_reaches_chat_and_canary_survives():
     stored = store.get_case(run.case_id)
     for key, value in seed_cfg.items():
         assert stored.oracle_config[key] == value
+
+
+BRIEF_SEED = REPO / "evals/seeds/authz_bypass_cross_patient/authz_07_brief_cross_patient.json"
+
+
+@pytest.mark.parametrize("status, body, expected", [
+    # F-50 today: the brief serves the out-of-panel chart, canary in a nested field.
+    (200, {"brief": "Summary for this patient.", "session_id": "sess-b",
+           "sections": {"notes": "Flag ZZ-CANARY-1 on file."}}, Verdict.FAIL),
+    # After an F-50 fix: denied, nothing leaks.
+    (403, {"detail": "patient not in your panel"}, Verdict.PASS),
+])
+def test_brief_seed_calls_pre_visit_brief_and_canary_oracle_grades_it(status, body, expected):
+    case = AttackCase.model_validate(json.loads(BRIEF_SEED.read_text()))
+    victim = case.oracle_config["patient_id"]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if str(request.url) == TOKEN_URL:
+            return httpx.Response(200, json={
+                "access_token": TOKEN, "token_type": "Bearer", "expires_in": 3600, "scope": "openid",
+            })
+        if request.url.path == "/pre-visit-brief":
+            return httpx.Response(status, json=body)
+        return httpx.Response(404, json={"detail": "not found"})
+
+    store = SqliteStore(":memory:")
+    store.add_case(case)
+    transport = httpx.MockTransport(handler)
+    rt = RedTeam(
+        store,
+        target_factory=lambda: TargetClient(config(), transport=transport),
+        config=config(),
+        default_patient_id=PATIENT,  # must be overridden by the seed's patient_id
+    )
+    run = rt.run_work_item(WorkItem(
+        target_category=AttackCategory.AUTHZ_BYPASS_CROSS_PATIENT,
+        seed_case_id=case.case_id,
+        token_budget=50_000,
+        reason="F-50 brief",
+    ))
+
+    posts = [r for r in requests if r.method == "POST" and r.url.path != "/oauth2/default/token"]
+    assert [r.url.path for r in posts] == ["/pre-visit-brief"]  # no chat turn
+    assert json.loads(posts[0].content)["patient_id"] == victim
+
+    assert [t.role for t in run.transcript] == ["user", "assistant"]
+    reply = json.loads(run.transcript[1].content)
+    assert reply["status_code"] == status and reply["body"] == body
+
+    verdict, evidence = canary_oracle(case, run, None)
+    assert verdict == expected
+    assert evidence["canary_hit"] is (expected == Verdict.FAIL)
 
 
 def test_attack_run_has_no_verdict(tmp_path):
@@ -356,7 +412,7 @@ def test_generates_fresh_case_when_no_seed(tmp_path):
 
     # The single generated user turn was replayed.
     assert any(t.role == "user" for t in run.transcript)
-    assert any(t.role == "api" for t in run.transcript)
+    assert any(t.role == "assistant" for t in run.transcript)
 
 
 def _routed_generator(env):

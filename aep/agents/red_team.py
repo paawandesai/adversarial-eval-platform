@@ -11,8 +11,12 @@ executed ``AttackRun``:
      (``aep.target.TargetClient``, async httpx): authenticate as the case's
      ``as_user_role``, then replay each turn — ``upload()`` for
      ``attacker_document`` turns that carry a file, ``chat()`` for conversation
-     turns. One correlation id is minted for the whole run and propagated on
-     every target call, so the Judge's grey-box reader can find the trace.
+     turns. A case whose ``target_endpoint`` is ``/pre-visit-brief`` sends its
+     first user turn as ``pre_visit_brief(patient_id)`` instead (later user
+     turns follow up in the brief's session). Target replies are recorded as
+     ``assistant`` turns — the role the oracles read as target output. One
+     correlation id is minted for the whole run and propagated on every
+     target call, so the Judge's grey-box reader can find the trace.
   3. **Capture and persist.** Transcript, any tool calls the target's public
      responses expose, and tokens/cost/latency (from ``aep.obs``) are written
      into an ``AttackRun`` in the Store.
@@ -37,6 +41,7 @@ default or Claude via the platform router.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
@@ -254,6 +259,11 @@ def _route_for(endpoint: str) -> Optional[str]:
     return None
 
 
+def _is_brief(endpoint: str) -> bool:
+    """True for the direct brief route (not its /conversation or /follow-up children)."""
+    return (endpoint or "").strip().lower().rstrip("/") == "/pre-visit-brief"
+
+
 # --------------------------------------------------------------------------- #
 # RedTeam
 # --------------------------------------------------------------------------- #
@@ -352,6 +362,7 @@ class RedTeam:
     ) -> tuple[list[ConversationTurn], list[dict], str]:
         patient_id = self._patient_id_for(case)
         route = _route_for(case.target_endpoint)
+        brief = _is_brief(case.target_endpoint)
         transcript: list[ConversationTurn] = []
         tool_calls: list[dict] = []
         version = "unknown"
@@ -387,7 +398,14 @@ class RedTeam:
                                 attachment_doc_type=turn.attachment_doc_type,
                             )
                         )
-                        transcript.append(ConversationTurn(role="api", content=_describe_upload(resp)))
+                        transcript.append(ConversationTurn(role="assistant", content=_describe_upload(resp)))
+                        tool_calls.extend(_observed_tool_calls(resp, idx))
+
+                    elif turn.role == "user" and brief and conversation_id is None:
+                        resp = await self._do_brief(client, span, case, patient_id, correlation_id)
+                        conversation_id = resp.get("conversation_id") or conversation_id
+                        transcript.append(ConversationTurn(role="user", content=turn.content))
+                        transcript.append(ConversationTurn(role="assistant", content=_describe_response(resp)))
                         tool_calls.extend(_observed_tool_calls(resp, idx))
 
                     elif turn.role == "user":
@@ -396,7 +414,7 @@ class RedTeam:
                         )
                         conversation_id = resp.get("conversation_id") or conversation_id
                         transcript.append(ConversationTurn(role="user", content=turn.content))
-                        transcript.append(ConversationTurn(role="api", content=_reply_text(resp)))
+                        transcript.append(ConversationTurn(role="assistant", content=_reply_text(resp)))
                         tool_calls.extend(_observed_tool_calls(resp, idx))
 
                     else:
@@ -426,6 +444,22 @@ class RedTeam:
             "target.upload",
             args={"patient_id": patient_id, "doc_type": doc_type, "path": turn.attachment_path},
             result={"status_code": resp.get("status_code"), "document_id": resp.get("document_id")},
+        )
+        return resp
+
+    async def _do_brief(
+        self, client: TargetClient, span: Any, case: AttackCase,
+        patient_id: Optional[str], correlation_id: str,
+    ) -> dict:
+        if not patient_id:
+            raise ValueError(
+                f"brief case {case.case_id} has no patient_id: set oracle_config.patient_id"
+            )
+        resp = await client.pre_visit_brief(patient_id, correlation_id=correlation_id)
+        span.tool_call(
+            "target.pre_visit_brief",
+            args={"patient_id": patient_id},
+            result={"status_code": resp.get("status_code"), "session_id": resp.get("conversation_id")},
         )
         return resp
 
@@ -509,6 +543,15 @@ def _reply_text(resp: dict) -> str:
             if isinstance(val, str) and val:
                 return val
     return f"[status={resp.get('status_code')}]"
+
+
+def _describe_response(resp: dict) -> str:
+    """The full status + body as JSON: the http_assert oracle parses it, and a
+    canary anywhere in the body (not just the prose brief) stays visible."""
+    return json.dumps(
+        {"status_code": resp.get("status_code"), "body": resp.get("body")},
+        default=str, sort_keys=True,
+    )
 
 
 def _describe_upload(resp: dict) -> str:

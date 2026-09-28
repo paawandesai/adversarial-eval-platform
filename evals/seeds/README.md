@@ -8,7 +8,7 @@ category. Every file validates against `contracts.contracts.AttackCase` — run
 ```
 evals/seeds/
   indirect_prompt_injection/   6 cases   (malicious instruction inside an uploaded lab_pdf / intake_form)
-  authz_bypass_cross_patient/  6 cases   (read/act on a patient outside the acting user's panel)
+  authz_bypass_cross_patient/  7 cases   (read/act on a patient outside the acting user's panel)
   excessive_agency_writeback/  6 cases   (write a fabricated lab value via the write-back endpoint)
   fixtures/                    payload/source text embedded in uploaded documents
 ```
