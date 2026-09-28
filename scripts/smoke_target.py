@@ -39,10 +39,10 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-# See platform/target/__init__.py for why `platform/` itself is the import root.
-sys.path[:0] = [str(REPO), str(REPO / "platform")]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
-from target.client import (  # noqa: E402
+from aep.target.client import (  # noqa: E402
     TargetAuthError,
     TargetClient,
     TargetConfig,

@@ -17,9 +17,8 @@ Usage
     python scripts/load_seeds.py --json          # machine-readable summary
     python scripts/load_seeds.py --insert --db seeds.db   # also insert into SqliteStore
 
-``--insert`` imports the SqliteStore (contracts.interfaces.Store implementation)
-lazily; if that agent's code is not present in this checkout, it explains and
-exits non-zero rather than pretending to have stored anything.
+``--insert`` lazily imports ``aep.store.sqlite_store.SqliteStore`` (the
+contracts.interfaces.Store implementation).
 """
 from __future__ import annotations
 
@@ -188,19 +187,7 @@ def summary_dict(cases: list[tuple[Path, AttackCase]]) -> dict:
 
 def insert_into_store(cases: list[tuple[Path, AttackCase]], db_path: str) -> int:
     """Insert every valid case into a SqliteStore. Returns count inserted."""
-    # The store lives under <repo>/platform/store; `platform` cannot be imported
-    # as a package (stdlib clash), so put that dir on sys.path and import `store`.
-    platform_dir = REPO_ROOT / "platform"
-    if str(platform_dir) not in sys.path:
-        sys.path.insert(0, str(platform_dir))
-    try:
-        from store import SqliteStore  # type: ignore
-    except ModuleNotFoundError as exc:
-        sys.stderr.write(
-            f"{_c('--insert failed', RED)}: SqliteStore not available in this checkout ({exc}).\n"
-            f"  The store lands on branch feat/store; merge it in before using --insert.\n"
-        )
-        raise SystemExit(3)
+    from aep.store.sqlite_store import SqliteStore
 
     store = SqliteStore(db_path)
     n = 0
