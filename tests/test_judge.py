@@ -5,6 +5,7 @@ The router is always a test double: no network, no API keys.
 """
 from __future__ import annotations
 
+import ast
 import json
 import pathlib
 import shutil
@@ -466,13 +467,62 @@ class TestGolden:
 # --------------------------------------------------------------------------- #
 # trust boundary
 # --------------------------------------------------------------------------- #
+AUDIT_MODULE = "aep.target.audit"
+AUDIT_ALLOWED = ("aep/agents/judge.py", "aep/target/audit.py")
+
+
+def audit_imports(source: str, rel: str) -> list[int]:
+    """Line numbers of real imports of aep.target.audit in `source`.
+
+    Parsed with ast, so comments and docstrings that merely name the module are
+    ignored. Relative imports are resolved against the file's package (`rel` is
+    its repo-relative posix path).
+    """
+    package = rel.split("/")[:-1]  # same for a module and for a package's __init__.py
+
+    def is_audit(name: str) -> bool:
+        return name == AUDIT_MODULE or name.startswith(AUDIT_MODULE + ".")
+
+    hits = []
+    for node in ast.walk(ast.parse(source, filename=rel)):
+        if isinstance(node, ast.Import):
+            if any(is_audit(a.name) for a in node.names):
+                hits.append(node.lineno)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package[: len(package) - (node.level - 1)]
+                module = ".".join(base + ([node.module] if node.module else []))
+            else:
+                module = node.module or ""
+            if is_audit(module) or any(is_audit(f"{module}.{a.name}") for a in node.names):
+                hits.append(node.lineno)
+    return hits
+
+
 def test_only_judge_imports_audit():
     offenders = []
     for path in (ROOT / "aep").rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
-        if rel in ("aep/agents/judge.py", "aep/target/audit.py"):
+        if rel in AUDIT_ALLOWED:
             continue
-        text = path.read_text()
-        if "aep.target.audit" in text or "from .audit" in text or "target.audit import" in text:
-            offenders.append(rel)
+        offenders += [f"{rel}:{n}" for n in audit_imports(path.read_text(), rel)]
     assert offenders == []
+
+
+@pytest.mark.parametrize("source, rel, flagged", [
+    ('"""Never imports aep.target.audit."""\n# aep.target.audit is Judge-only\n',
+     "aep/agents/red_team.py", False),
+    ("import aep.target.audit\n", "aep/agents/red_team.py", True),
+    ("import aep.target.audit as a\n", "aep/agents/__init__.py", True),
+    ("from aep.target.audit import AuditReader\n", "aep/agents/red_team.py", True),
+    ("from aep.target import audit\n", "aep/agents/red_team.py", True),
+    ("from ..target.audit import AuditReader\n", "aep/agents/red_team.py", True),
+    ("from ..target import audit\n", "aep/agents/red_team.py", True),
+    ("from .audit import AuditReader\n", "aep/target/other.py", True),
+    ("from . import audit\n", "aep/target/__init__.py", True),
+    ("def f():\n    from aep.target.audit import AuditReader\n", "aep/agents/red_team.py", True),
+    ("from aep.target import other\n", "aep/agents/red_team.py", False),
+    ("from .audit import x\n", "aep/agents/red_team.py", False),
+])
+def test_audit_import_detector(source, rel, flagged):
+    assert bool(audit_imports(source, rel)) is flagged
