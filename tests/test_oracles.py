@@ -11,21 +11,15 @@ import sys
 
 import pytest
 
-# `platform/` collides with the stdlib module that bare `pytest` imports before
-# collection. Put the repo root on sys.path and, if the stdlib module won the
-# race, let it resolve our subpackages too. Remove once the package is renamed.
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-import platform as _platform  # noqa: E402
-if not hasattr(_platform, "__path__"):
-    _platform.__path__ = [str(ROOT / "platform")]
 
 from contracts.contracts import (  # noqa: E402
     AttackCase, AttackCategory, AttackRun, ConversationTurn, JudgeVerdict,
     OracleType, Origin, OwaspMapping, OwaspClassic, OwaspLLM, Severity, Verdict,
 )
-from platform.oracles import (  # noqa: E402
+from aep.oracles import (  # noqa: E402
     ORACLES, canary_oracle, http_assert_oracle, judge_deterministic,
     log_scan_oracle, token_counter_oracle, tool_call_audit_oracle,
 )

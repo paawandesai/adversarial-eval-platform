@@ -16,7 +16,7 @@ derived from the correlation_id; nested trace() calls become child spans.
 
 Config (env): LANGFUSE_HOST, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY.
 If any is missing, the SDK isn't installed, or Langfuse errors, the tracer
-degrades to local logging (logger "platform.obs") and never raises into the
+degrades to local logging (logger "aep.obs") and never raises into the
 caller. All payloads go through scrub() before they reach Langfuse or the log.
 Prompt/completion text is only sent when OBS_CAPTURE_CONTENT=1 (still scrubbed),
 since free text can carry PHI no regex will catch.
@@ -35,9 +35,9 @@ from collections import OrderedDict, deque
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
-from platform.obs.scrub import langfuse_mask, scrub
+from aep.obs.scrub import langfuse_mask, scrub
 
-log = logging.getLogger("platform.obs")
+log = logging.getLogger("aep.obs")
 
 _current: contextvars.ContextVar[Optional["Span"]] = contextvars.ContextVar("obs_span", default=None)
 

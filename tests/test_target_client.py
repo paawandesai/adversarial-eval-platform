@@ -1,5 +1,5 @@
 """
-Unit tests for platform/target — httpx.MockTransport only, no live calls.
+Unit tests for aep/target — httpx.MockTransport only, no live calls.
 
 Async code is driven with asyncio.run() so the suite needs nothing beyond
 pytest and httpx.
@@ -20,14 +20,11 @@ import httpx
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-# `platform/` cannot be a package (it would shadow the stdlib module), so its
-# contents are imported from the directory itself; see platform/target/__init__.py.
-for path in (str(REPO), str(REPO / "platform")):
-    if path not in sys.path:
-        sys.path.insert(0, path)
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
-from target.audit import AuditConfig, AuditReader, AuditUnavailable, trace_id_for  # noqa: E402
-from target.client import (  # noqa: E402
+from aep.target.audit import AuditConfig, AuditReader, AuditUnavailable, trace_id_for  # noqa: E402
+from aep.target.client import (  # noqa: E402
     CORRELATION_ID_HEADER,
     TargetAuthError,
     TargetClient,
@@ -604,17 +601,17 @@ def test_audit_requires_its_own_credential():
 
 
 def test_target_client_import_graph_never_reaches_audit():
-    """The Red Team imports target / target.client; neither may pull in target.audit."""
+    """The Red Team imports aep.target / aep.target.client; neither may pull in aep.target.audit."""
     code = (
-        "import sys; sys.path[:0] = [sys.argv[1], sys.argv[2]]; "
-        "import target, target.client; "
-        "assert 'target.audit' not in sys.modules, 'target.audit leaked'"
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "import aep.target, aep.target.client; "
+        "assert 'aep.target.audit' not in sys.modules, 'aep.target.audit leaked'"
     )
     subprocess.run(
-        [sys.executable, "-c", code, str(REPO), str(REPO / "platform")], check=True
+        [sys.executable, "-c", code, str(REPO)], check=True
     )
 
 
 def test_audit_module_carries_the_judge_only_banner():
-    first = (REPO / "platform" / "target" / "audit.py").read_text().splitlines()[0]
+    first = (REPO / "aep" / "target" / "audit.py").read_text().splitlines()[0]
     assert "JUDGE-ONLY" in first and "Red Team must never import this" in first

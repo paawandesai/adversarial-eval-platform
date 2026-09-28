@@ -7,16 +7,12 @@ import time
 
 import pytest
 
-# `platform` shadows the stdlib module, which pytest has already imported by the
-# time this file loads. Swap in the project package (it re-exports the stdlib API).
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-if not hasattr(sys.modules.get("platform"), "__path__"):
-    sys.modules.pop("platform", None)
 
-from platform.obs import LangfuseTracer, register_canaries, scrub, set_tracer, traced  # noqa: E402
-from platform.obs import tracing  # noqa: E402
+from aep.obs import LangfuseTracer, register_canaries, scrub, set_tracer, traced  # noqa: E402
+from aep.obs import tracing  # noqa: E402
 
 LANGFUSE_ENV = ("LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
 
@@ -132,7 +128,7 @@ def test_scrub_pydantic_contract_model():
 def test_trace_records_latency_without_langfuse_env(no_langfuse_env, caplog):
     tracer = LangfuseTracer()
     assert not tracer.enabled
-    with caplog.at_level(logging.INFO, logger="platform.obs"):
+    with caplog.at_level(logging.INFO, logger="aep.obs"):
         with tracer.trace("corr_1", "redteam.generate") as span:
             time.sleep(0.02)
     assert span.latency_ms is not None and span.latency_ms >= 15

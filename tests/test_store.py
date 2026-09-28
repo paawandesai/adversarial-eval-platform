@@ -1,4 +1,3 @@
-import importlib.util
 import inspect
 import sys
 from pathlib import Path
@@ -15,21 +14,8 @@ from contracts.contracts import (  # noqa: E402
 from contracts.interfaces import Store  # noqa: E402
 
 
-def _load_store_pkg():
-    # The top-level ``platform/`` directory shares its name with the stdlib ``platform`` module, which is
-    # already imported by the time tests run, so ``import platform.store`` can't work. Load it by path.
-    pkg_dir = ROOT / "platform" / "store"
-    spec = importlib.util.spec_from_file_location(
-        "platform_store", pkg_dir / "__init__.py", submodule_search_locations=[str(pkg_dir)]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-store_pkg = _load_store_pkg()
-SqliteStore = store_pkg.SqliteStore
+from aep.store import SCHEMA_VERSION, SqliteStore  # noqa: E402
+from aep.store import sqlite_store  # noqa: E402
 
 CAT_PI = AttackCategory.DIRECT_PROMPT_INJECTION
 CAT_AUTHZ = AttackCategory.AUTHZ_BYPASS_CROSS_PATIENT
@@ -108,7 +94,7 @@ def test_conforms_to_store_protocol():
 def test_schema_version_recorded_and_reopen_is_idempotent(tmp_path):
     path = str(tmp_path / "store.db")
     with SqliteStore(path) as s:
-        assert s.schema_version == store_pkg.SCHEMA_VERSION == 1
+        assert s.schema_version == SCHEMA_VERSION == 1
         assert s.meta("contract_schema_version") == "v1"
         case = make_case()
         s.add_case(case)
@@ -124,7 +110,7 @@ def test_migration_adds_column_without_data_loss(tmp_path, monkeypatch):
         s.add_case(case)
         run = make_run(case)
         s.add_run(run)
-    monkeypatch.setitem(store_pkg.sqlite_store.MIGRATIONS, 2, [
+    monkeypatch.setitem(sqlite_store.MIGRATIONS, 2, [
         "ALTER TABLE runs ADD COLUMN redteam_model TEXT",
         "UPDATE runs SET redteam_model = json_extract(body, '$.redteam_model')",
     ])
@@ -215,7 +201,7 @@ def test_failed_migration_rolls_back(tmp_path, monkeypatch):
     with SqliteStore(path) as s:
         case = make_case()
         s.add_case(case)
-    monkeypatch.setitem(store_pkg.sqlite_store.MIGRATIONS, 2, [
+    monkeypatch.setitem(sqlite_store.MIGRATIONS, 2, [
         "ALTER TABLE cases ADD COLUMN subcategory TEXT",
         "UPDATE no_such_table SET x = 1",
     ])
