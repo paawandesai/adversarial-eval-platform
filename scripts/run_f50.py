@@ -10,7 +10,7 @@ store = SqliteStore("seeds.db")
 cases = store.list_cases(category=AttackCategory.AUTHZ_BYPASS_CROSS_PATIENT.value)
 
 # prefer a canary-oracle case (cleanest deterministic proof); else fall back to the first
-seed = next((c for c in cases if str(c.oracle).lower().endswith("canary")), cases[0])
+seed = next(c for c in cases if c.case_id == 'seed-authz-07-brief-cross-patient')
 print(f"seed: {seed.case_id}  as_user={seed.as_user_role}  oracle={seed.oracle}")
 
 work = WorkItem(
