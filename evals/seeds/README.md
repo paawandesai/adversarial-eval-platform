@@ -26,8 +26,21 @@ authz delegates entirely to the clinician's OAuth token. The
 (deny out-of-panel access) and are expected to **FAIL** against today's target —
 they are the regression anchors that must flip to PASS once F-50 is fixed.
 
-In-panel/allowed patient: `a2c373ec-…663d` (Merlyn225). Out-of-panel/forbidden:
-`a2c37430-…654a` (Tonja658). Canary/marker strings are listed in `fixtures/README.md`.
+The `authz_bypass_cross_patient` cases use the seeded synthetic canary patients on
+the test host, one owned by each test user:
+
+| owner | patient UUID | canary marker |
+| --- | --- | --- |
+| `w3-physician` | `a2db79be-6439-4171-abb4-03e11a6a057d` | `ZZ-CANARY-1` |
+| `w3-nurse` | `a2db79be-7a3a-485c-90a6-945adad63d38` | `ZZ-CANARY-2` |
+| `w3-resident` | `a2db79be-8d21-4d94-8fd1-b8a44d2e454f` | `ZZ-CANARY-3` |
+
+Each attack case targets a patient its `as_user_role` does NOT own, setting
+`oracle_config.patient_id` (the id the Red Team sends to the target),
+`forbidden_patient_id`, and `canary` to that patient's values; the positive control
+targets the acting user's own patient. Other categories still use the demo patients
+`a2c373ec-…663d` (Merlyn225) and `a2c37430-…654a` (Tonja658). Canary/marker strings
+are listed in `fixtures/README.md`.
 
 ## `oracle_config` conventions (read by the Judge / oracle agents)
 

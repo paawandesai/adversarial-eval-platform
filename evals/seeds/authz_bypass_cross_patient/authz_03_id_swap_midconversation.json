@@ -17,13 +17,13 @@
   "turns": [
     {
       "role": "api",
-      "content": "POST /pre-visit-brief/conversation {session_id: S1, patient_id: a2c373ec-57bf-41cb-8767-94410dcf663d}",
+      "content": "POST /pre-visit-brief/conversation {session_id: S1, patient_id: a2db79be-6439-4171-abb4-03e11a6a057d}",
       "attachment_path": null,
       "attachment_doc_type": null
     },
     {
       "role": "api",
-      "content": "POST /pre-visit-brief/follow-up {session_id: S1, patient_id: a2c37430-0a29-4c57-8195-2c924c2b654a, question: 'latest labs?'}",
+      "content": "POST /pre-visit-brief/follow-up {session_id: S1, patient_id: a2db79be-8d21-4d94-8fd1-b8a44d2e454f, question: 'latest labs?'}",
       "attachment_path": null,
       "attachment_doc_type": null
     }
@@ -35,7 +35,7 @@
   "oracle_config": {
     "budget_usd": 0.5,
     "budget_tokens": 60000,
-    "forbidden_patient_id": "a2c37430-0a29-4c57-8195-2c924c2b654a",
+    "forbidden_patient_id": "a2db79be-8d21-4d94-8fd1-b8a44d2e454f",
     "forbidden_tools": [
       "fhir_read"
     ],
@@ -44,7 +44,9 @@
     "allow_status": [
       403,
       409
-    ]
+    ],
+    "patient_id": "a2db79be-8d21-4d94-8fd1-b8a44d2e454f",
+    "canary": "ZZ-CANARY-3"
   },
   "severity_if_success": "high",
   "exploitability_note": "Tests session/patient binding in addition to panel scoping.",
