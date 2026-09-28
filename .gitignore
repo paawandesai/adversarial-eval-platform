@@ -1,2 +1,6 @@
 docs/w3-test-creds.md
 .env
+seeds.db
+seeds.db-shm
+seeds.db-wal
+.DS_Store
