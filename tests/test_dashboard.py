@@ -1,9 +1,14 @@
 import hashlib
 import importlib.util
+import json
 import re
 import sqlite3
 import sys
+import threading
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -321,3 +326,94 @@ def test_cli_writes_html_file(tmp_path, capsys):
     assert dashboard.main(["--db", str(tmp_path / "none.db"), "--out", str(out)]) == 0
     assert out.read_text().startswith("<!doctype html>")
     assert str(out) in capsys.readouterr().out
+
+
+# ---- --watch / live auto-refresh -------------------------------------------------------------------
+
+
+def test_aggregates_are_json_safe_and_signature_tracks_changes(tmp_path):
+    db = tmp_path / "store.db"
+    with SqliteStore(str(db)) as store:
+        store.add_case(case("c1"))
+        r1 = run("r1", "c1")
+        store.add_run(r1)
+        store.add_verdict(verdict(r1, Verdict.FAIL, canary_hit=True))
+
+    agg1 = dashboard.aggregates(str(db))
+    json.dumps(agg1)  # must be serializable for the /data endpoint (raises otherwise)
+    assert agg1["stats"]["runs"] == 1 and agg1["stats"]["verdicts"] == 1 and agg1["stats"]["fail"] == 1
+    assert agg1["findings"] == 0 and agg1["signature"]
+    assert db.read_bytes() == db.read_bytes()  # sanity: file untouched by the read
+
+    # A campaign writing more verdicts/findings must move the signature (drives the reload).
+    with SqliteStore(str(db)) as store:
+        r2 = run("r2", "c1")
+        store.add_run(r2)
+        store.add_verdict(verdict(r2, Verdict.PASS))
+        store.add_report(report("V1", Severity.CRITICAL, case_id="c1"))
+
+    agg2 = dashboard.aggregates(str(db))
+    assert agg2["stats"]["runs"] == 2 and agg2["findings"] == 1
+    assert agg2["signature"] != agg1["signature"]
+
+
+def test_aggregates_degrade_gracefully_on_missing_and_unreadable_store(tmp_path):
+    missing = dashboard.aggregates(str(tmp_path / "nope.db"))
+    assert missing["findings"] == 0 and missing["signature"] and "error" not in missing
+
+    bad = tmp_path / "bad.db"
+    bad.write_bytes(b"this is not a sqlite database")  # simulates a locked/mid-write/corrupt read
+    agg = dashboard.aggregates(str(bad))
+    json.dumps(agg)  # never raises to the poller
+    assert "error" in agg and agg["signature"] == "" and agg["findings"] == 0
+
+
+def test_watch_injects_poller_and_live_badge_else_not():
+    data = dashboard.build(FakeStore(), env={}, reviews={}, source="s.db")
+
+    watched = dashboard.render_html(data, watch=True, interval_s=3.0)
+    assert "fetch('data'" in watched and "location.reload" in watched
+    assert "live (every 3s)" in watched
+    assert "ms=3000" in watched  # 3s interval honored (3000ms)
+    assert "read-only" in watched
+
+    plain = dashboard.render_html(data, watch=False)
+    assert "fetch('data'" not in plain and "location.reload" not in plain and "live (every" not in plain
+
+
+def test_data_route_serves_json_and_page_is_read_only(tmp_path):
+    db = tmp_path / "store.db"
+    with SqliteStore(str(db)) as store:
+        store.add_case(case("c1"))
+        r1 = run("r1", "c1")
+        store.add_run(r1)
+        store.add_verdict(verdict(r1, Verdict.FAIL, canary_hit=True))
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.make_handler(str(db), watch=True, interval_s=3.0))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    try:
+        with urllib.request.urlopen(f"{base}/data", timeout=5) as resp:
+            assert resp.status == 200
+            assert resp.headers.get("Content-Type") == "application/json"
+            payload = json.loads(resp.read())
+        assert payload["stats"]["runs"] == 1 and payload["stats"]["fail"] == 1 and payload["signature"]
+
+        with urllib.request.urlopen(f"{base}/", timeout=5) as resp:
+            page = resp.read().decode()
+        assert page.startswith("<!doctype html>") and "fetch('data'" in page
+
+        with pytest.raises(urllib.error.HTTPError) as missing:
+            urllib.request.urlopen(f"{base}/attack", timeout=5)
+        assert missing.value.code == 404
+
+        # Read-only: there is no write route. A POST is rejected (no do_POST handler).
+        with pytest.raises(urllib.error.HTTPError) as posted:
+            urllib.request.urlopen(urllib.request.Request(f"{base}/data", data=b"x", method="POST"), timeout=5)
+        assert posted.value.code in (400, 501)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    assert len(SqliteStore.open_readonly(str(db)).list_runs()) == 1  # store still intact, unmodified

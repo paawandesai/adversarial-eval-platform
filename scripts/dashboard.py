@@ -3,6 +3,7 @@
     python3 scripts/dashboard.py                          # seeds.db -> dashboard.html
     python3 scripts/dashboard.py --db seeds.db --out /tmp/aep.html
     python3 scripts/dashboard.py --serve --port 8765      # re-reads the store on every request
+    python3 scripts/dashboard.py --serve --watch          # + auto-refresh live as a campaign writes
 
 When serving, /health and /ready answer as in aep/health.py (liveness, and dependency readiness with a 503).
 
@@ -27,6 +28,7 @@ import html
 import os
 import pathlib
 import sys
+import json
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -576,44 +578,114 @@ def _versions(rows: list[dict[str, Any]]) -> str:
         f'<th class="n">Fixes</th><th>Outcome mix</th></tr></thead><tbody>{body}</tbody></table></div></section>')
 
 
-def render_html(data: Mapping[str, Any]) -> str:
+def _signature(stats: Mapping[str, Any], findings: int) -> str:
+    """A compact string that changes iff a shown aggregate changed — the /watch poll's diff key."""
+    return json.dumps({"stats": stats, "findings": findings}, sort_keys=True, default=str)
+
+
+def _watch_js(signature: str, interval_s: float) -> str:
+    """Poll /data every interval; reload only when the aggregate signature changes (no idle flashing).
+
+    Read-only: it fetches JSON aggregates and reloads the page — it never posts and never triggers
+    an attack. A failed/locked read is ignored and the next tick retries."""
+    ms = max(1000, int(interval_s * 1000))
+    return (
+        "(function(){var sig=" + json.dumps(signature) + ";var ms=" + str(ms) + ";"
+        "function tick(){fetch('data',{cache:'no-store'})"
+        ".then(function(r){return r.ok?r.json():null;})"
+        ".then(function(d){if(d&&d.signature&&d.signature!==sig){location.reload();return;}"
+        "setTimeout(tick,ms);}).catch(function(){setTimeout(tick,ms);});}"
+        "setTimeout(tick,ms);})();"
+    )
+
+
+def render_html(data: Mapping[str, Any], watch: bool = False, interval_s: float = 3.0) -> str:
     notice = f'<div class="notice">{_e(data["notice"])}</div>' if data.get("notice") else ""
     link_note = "" if data["langfuse_linked"] else " · Langfuse links off (set LANGFUSE_HOST + LANGFUSE_PROJECT_ID)"
+    live = (f'<span style="color:var(--good);font-size:12px"> · ● live (every {_e(str(int(interval_s)))}s)</span>'
+            if watch else "")
+    watch_js = ""
+    if watch:
+        sig = _signature(data["stats"], data["stats"].get("findings", 0))
+        watch_js = f"<script>{_watch_js(sig, interval_s)}</script>"
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f'<title>AEP Dashboard</title><style>{_CSS}</style></head><body><main>'
         '<header><h1>Adversarial eval platform</h1>'
-        f'<div class="sub">{_e(data["source"])} · generated {_e(_ts(data["generated_at"]))} · read-only{_e(link_note)}</div>'
+        f'<div class="sub">{_e(data["source"])} · generated {_e(_ts(data["generated_at"]))} · read-only{_e(link_note)}{live}</div>'
         f'</header>{notice}{_tiles(data["stats"])}{_coverage(data["coverage"])}{_findings(data["findings"])}'
         f'{_feed(data["feed"], data["feed_total"])}{_versions(data["versions"])}'
-        f'</main><script>{_JS}</script></body></html>')
+        f'</main><script>{_JS}</script>{watch_js}</body></html>')
 
 
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
-def generate(db: str) -> str:
+def generate(db: str, watch: bool = False, interval_s: float = 3.0) -> str:
     """Render the page for ``db``. A missing file renders an empty dashboard instead of creating one."""
     if not pathlib.Path(db).exists():
         with SqliteStore(":memory:") as empty:
-            return render_html(build(empty, source=db, notice=f"No database at {db}: showing an empty store."))
+            return render_html(build(empty, source=db, notice=f"No database at {db}: showing an empty store."),
+                               watch=watch, interval_s=interval_s)
     with SqliteStore.open_readonly(db) as store:
-        return render_html(build(store, source=db))
+        return render_html(build(store, source=db), watch=watch, interval_s=interval_s)
 
 
-def serve(db: str, host: str, port: int) -> None:
+def _aggregates(store: Any, db: str, notice: str = "") -> dict[str, Any]:
+    runs, verdicts, reports = store.list_runs(), store.list_verdicts(), store.list_reports()
+    stats = header_stats(runs, verdicts, reports)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": db,
+        "notice": notice,
+        "stats": stats,
+        "coverage": coverage_matrix(store.coverage(), store.list_cases(), runs, verdicts),
+        "findings": len(reports),
+        "signature": _signature(stats, len(reports)),
+    }
+
+
+def aggregates(db: str) -> dict[str, Any]:
+    """Current JSON-safe aggregates for the ``/data`` poll. Read-only, and never raises.
+
+    A missing file returns an empty-store payload. A transient read failure — the campaign writes
+    while the dashboard reads — returns the last-shape payload with an ``error`` note, still HTTP 200
+    so the poller keeps ticking rather than seeing a 500 and stopping."""
+    try:
+        if not pathlib.Path(db).exists():
+            with SqliteStore(":memory:") as empty:
+                return _aggregates(empty, db, notice=f"No database at {db}.")
+        with SqliteStore.open_readonly(db) as store:
+            return _aggregates(store, db)
+    except Exception as exc:  # locked/mid-write/corrupt read: degrade, don't 500
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "source": db,
+            "error": f"{type(exc).__name__}: {exc}",
+            "stats": {}, "coverage": [], "findings": 0, "signature": "",
+        }
+
+
+def make_handler(db: str, watch: bool = False, interval_s: float = 3.0) -> type[BaseHTTPRequestHandler]:
+    """The read-only GET handler: ``/`` (page), ``/data`` (JSON aggregates for --watch), ``/health``,
+    ``/ready``. There is no POST and no attack-triggering route — the dashboard only observes."""
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             probe = health.handle(self.path)
             if probe is not None:
                 health.write_json(self, *probe)
                 return
-            if self.path.split("?")[0] not in ("/", "/index.html"):
+            route = self.path.split("?")[0].rstrip("/") or "/"
+            if route == "/data":  # read-only JSON aggregates for the --watch poll
+                health.write_json(self, 200, aggregates(db))
+                return
+            if route not in ("/", "/index.html"):
                 self.send_error(404)
                 return
             try:
-                body, status = generate(db).encode("utf-8"), 200
+                body, status = generate(db, watch=watch, interval_s=interval_s).encode("utf-8"), 200
             except Exception as exc:  # show the failure instead of dropping the connection
                 body, status = f"dashboard error: {type(exc).__name__}: {exc}".encode("utf-8"), 500
             self.send_response(status)
@@ -626,8 +698,13 @@ def serve(db: str, host: str, port: int) -> None:
         def log_message(self, fmt: str, *args: Any) -> None:
             sys.stderr.write(f"[dashboard] {fmt % args}\n")
 
-    httpd = ThreadingHTTPServer((host, port), Handler)
-    print(f"serving {db} at http://{host}:{port}/  (Ctrl-C to stop)")
+    return Handler
+
+
+def serve(db: str, host: str, port: int, watch: bool = False, interval_s: float = 3.0) -> None:
+    httpd = ThreadingHTTPServer((host, port), make_handler(db, watch=watch, interval_s=interval_s))
+    mode = f"  (--watch: auto-refresh every {int(interval_s)}s)" if watch else ""
+    print(f"serving {db} at http://{host}:{port}/  (Ctrl-C to stop){mode}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -643,10 +720,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--serve", action="store_true", help="serve over HTTP instead of writing a file")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--watch", action="store_true",
+                   help="with --serve: auto-refresh the page from the store on an interval (live campaign view)")
+    p.add_argument("--interval", type=float, default=3.0,
+                   help="--watch poll interval in seconds (default: 3)")
     args = p.parse_args(argv)
     if args.serve:
-        serve(args.db, args.host, args.port)
+        serve(args.db, args.host, args.port, watch=args.watch, interval_s=args.interval)
         return 0
+    if args.watch:
+        print("--watch has no effect without --serve (a static file cannot auto-refresh)", file=sys.stderr)
     out = pathlib.Path(args.out)
     out.write_text(generate(args.db), encoding="utf-8")
     print(f"wrote {out.resolve()}")

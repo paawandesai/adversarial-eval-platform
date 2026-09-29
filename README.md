@@ -65,8 +65,13 @@ re-reads `seeds.db` on every request):
 
 ```bash
 python3 scripts/dashboard.py --serve --port 8765     # then open http://localhost:8765
+python3 scripts/dashboard.py --serve --watch         # auto-refresh live while a campaign runs elsewhere
 python3 scripts/dashboard.py --db seeds.db --out /tmp/aep.html   # or render a static file
 ```
+
+With `--watch`, the page polls a read-only `/data` JSON endpoint (default every 3s, `--interval`)
+and refreshes when verdicts, findings, or coverage change — so a campaign running in another
+terminal shows up live. The dashboard only ever observes; it has no attack-triggering controls.
 
 **5. Regression gate** — replays the confirmed exploits (regression-suite cases with a FAIL on
 record) and the positive controls through `Orchestrator.run_regression`, then compares against the
