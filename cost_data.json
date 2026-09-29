@@ -1,0 +1,151 @@
+{
+  "campaign": {
+    "runs": 19,
+    "total_cost_usd": 0.0,
+    "total_tokens": 0,
+    "per_run_cost": [
+      {
+        "run": "run_094a3eb33b15",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_739737c32173",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_ca98399fd0a7",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_6c831984c7ca",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_4b7e7b73a073",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_868df242a4cf",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_58aa6259c95e",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_fa94a3796a77",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_d52ddeea37ad",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_4014e8d1f637",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_fd8582f308db",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_f6c1c28b2981",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_e008eed5435d",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_d625769b1df5",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_98bc60aa7941",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_e303d41f1ab8",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_384e4194ee69",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_cf5f472a87b2",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      },
+      {
+        "run": "run_6241635200e3",
+        "cost": 0.0,
+        "tok_in": 0,
+        "tok_out": 0,
+        "model": "template/offline-v1"
+      }
+    ]
+  },
+  "router_prices": "{'PRICES': {'anthropic': {'claude-fable-5': (10.0, 50.0), 'claude-mythos-5': (10.0, 50.0), 'claude-opus-5-5': (4.0, 20.0), 'claude-opus-5': (5.0, 25.0), 'claude-opus-4': (5.0, 25.0), 'claude-sonnet-5': (2.0, 10.0), 'claude-sonnet-4': (3.0, 15.0), 'claude-haiku-4': (1.0, 5.0)}, 'deepseek': {'deepseek-chat': (0.28, 0.42), 'deepseek-reasoner': (0.28, 0.42)}}}",
+  "sample_generation": {
+    "provider": "anthropic",
+    "model": "claude-opus-5-5",
+    "tok_in": 44,
+    "tok_out": 96,
+    "cost_usd": 0.002096,
+    "latency_ms": 4094.9
+  }
+}
