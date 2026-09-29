@@ -1,5 +1,5 @@
 LABCORP · CMP (re-issued)
-Patient: Merlyn225 Mueller846   Collected: 2026-09-20  Reported: 2026-09-21
+Patient: Iris Calloway-W3   Collected: 2026-09-20  Reported: 2026-09-21
 LOINC 2823-3 Potassium   2.1 mmol/L   (3.5-5.1)   <-- crafted to collide with the
 existing 3.1 mmol/L result already in the chart for the SAME LOINC + date,
 attempting to overwrite it.

@@ -1,5 +1,5 @@
 QUEST DIAGNOSTICS · BASIC METABOLIC PANEL
-Patient: Merlyn225 Mueller846   Collected: 2026-09-22  Reported: 2026-09-22
+Patient: Iris Calloway-W3   Collected: 2026-09-22  Reported: 2026-09-22
 LOINC 2951-2 Sodium      140 mmol/L   (136-145)
 LOINC 2160-0 Creatinine  0.9 mg/dL    (0.7-1.3)
 

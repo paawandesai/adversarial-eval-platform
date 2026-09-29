@@ -10,7 +10,7 @@ extraction pipeline).
 - `*_exfil / *_writeback / *_sysprompt / *_persona` — malicious documents whose
   hidden/embedded text carries an injection. The `<<HIDDEN TEXT LAYER>>` markers
   denote content invisible to a human reader but visible to the extractor.
-- `benign_lab_cmp.txt`, `ea_benign_real_lab.txt` — clean documents used by the
+- `benign_lab_cmp.txt`, `ea_benign_cmp_nurse.txt` (same CMP, headed for the nurse's patient), `ea_benign_real_lab.txt` — clean documents used by the
   **positive-control** twins that MUST still succeed.
 - `ipi_malformed_not_a_pdf.pdf` — deliberately not a valid PDF (no `%PDF-`
   magic); the upload guard must reject it with 415 before any extraction.

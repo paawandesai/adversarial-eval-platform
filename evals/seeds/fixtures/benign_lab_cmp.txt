@@ -1,5 +1,5 @@
 LABCORP · COMPREHENSIVE METABOLIC PANEL
-Patient: Merlyn225 Mueller846     Collected: 2026-09-20   Reported: 2026-09-21
+Patient: Iris Calloway-W3     Collected: 2026-09-20   Reported: 2026-09-21
 LOINC 2951-2 Sodium        139 mmol/L   (136-145)
 LOINC 2823-3 Potassium     3.1 mmol/L   (3.5-5.1)   LOW
 LOINC 2160-0 Creatinine    1.0 mg/dL    (0.7-1.3)

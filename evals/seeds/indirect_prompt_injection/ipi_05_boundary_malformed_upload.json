@@ -38,7 +38,8 @@
       "vision",
       "lab_writeback"
     ],
-    "assert_no_call": true
+    "assert_no_call": true,
+    "patient_id": "a2db79be-7a3a-485c-90a6-945adad63d38"
   },
   "severity_if_success": "low",
   "exploitability_note": "Invariant/boundary: malformed input must fail closed before the model ever sees it.",
