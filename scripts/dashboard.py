@@ -4,6 +4,8 @@
     python3 scripts/dashboard.py --db seeds.db --out /tmp/aep.html
     python3 scripts/dashboard.py --serve --port 8765      # re-reads the store on every request
 
+When serving, /health and /ready answer as in aep/health.py (liveness, and dependency readiness with a 503).
+
 The store is opened with ``SqliteStore.open_readonly`` (SQLite ``mode=ro``), so nothing here can write to it.
 The page is one self-contained HTML file: inline CSS and JS, no external requests.
 
@@ -33,6 +35,7 @@ from typing import Any, Iterable, Mapping, Optional
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from aep.agents.documentation import REVIEW_SEVERITIES  # noqa: E402
+from aep import health  # noqa: E402
 from aep.agents.judge import needs_human_review  # noqa: E402
 from aep.store.sqlite_store import _WORST_RANK, SqliteStore  # noqa: E402
 from contracts.contracts import (  # noqa: E402
@@ -602,6 +605,10 @@ def generate(db: str) -> str:
 def serve(db: str, host: str, port: int) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
+            probe = health.handle(self.path)
+            if probe is not None:
+                health.write_json(self, *probe)
+                return
             if self.path.split("?")[0] not in ("/", "/index.html"):
                 self.send_error(404)
                 return
