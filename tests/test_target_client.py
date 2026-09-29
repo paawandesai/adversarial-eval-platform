@@ -38,6 +38,19 @@ PATIENT = "a2c0e096-23d5-4cf9-ad5b-4895597363a7"
 TOKEN = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyLTEifQ.sig"
 
 
+# Env the client reads (TargetConfig.from_env, credentials_for) or the audit reader might. Cleared for every
+# test so the suite passes the same whether or not a real .env is sourced into the shell.
+AMBIENT_ENV_PREFIXES = ("TARGET_", "FHIR_CLIENT_", "AUDIT_LANGFUSE_")
+
+
+@pytest.fixture(autouse=True)
+def isolated_env(monkeypatch):
+    import os
+    for name in list(os.environ):
+        if name.startswith(AMBIENT_ENV_PREFIXES):
+            monkeypatch.delenv(name)
+
+
 def config(**overrides) -> TargetConfig:
     values = dict(
         base_url=BASE,

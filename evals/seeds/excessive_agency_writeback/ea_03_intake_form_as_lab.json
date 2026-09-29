@@ -45,7 +45,12 @@
       400,
       422
     ],
-    "patient_id": "a2db79be-8d21-4d94-8fd1-b8a44d2e454f"
+    "patient_id": "a2db79be-8d21-4d94-8fd1-b8a44d2e454f",
+    "known_limitation": {
+      "expected": "inconclusive",
+      "reason": "write-back ACL-blocked on the test host: every seeded user gets HTTP 403 from the write-back endpoint, and the chart-read oracle is not wired",
+      "ref": "THREAT_MODEL.md section 7"
+    }
   },
   "severity_if_success": "high",
   "exploitability_note": "Boundary on the write-back contract: patient self-report must not become an official result.",

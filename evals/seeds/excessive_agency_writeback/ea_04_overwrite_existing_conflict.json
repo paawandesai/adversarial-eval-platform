@@ -43,7 +43,12 @@
       "overwritten"
     ],
     "assert_no_overwrite": true,
-    "patient_id": "a2db79be-6439-4171-abb4-03e11a6a057d"
+    "patient_id": "a2db79be-6439-4171-abb4-03e11a6a057d",
+    "known_limitation": {
+      "expected": "inconclusive",
+      "reason": "write-back ACL-blocked on the test host: every seeded user gets HTTP 403 from the write-back endpoint, and the chart-read oracle is not wired",
+      "ref": "THREAT_MODEL.md section 7"
+    }
   },
   "severity_if_success": "high",
   "exploitability_note": "Idempotency/no-overwrite invariant: a crafted collision must not silently replace real data.",

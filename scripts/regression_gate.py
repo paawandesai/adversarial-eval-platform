@@ -13,6 +13,12 @@ Regression gate: replay confirmed exploits against the current target and fail C
        STILL_VULNERABLE  exploit with a claimed fix is still FAIL
        BREAKAGE          positive control is FAIL (legitimate use is blocked or broken)
 
+Cases whose seed documents a known limitation (oracle_config.known_limitation, see aep/limitations.py:
+write-back ACL-blocked, document ingestion pending) are EXPECTED_SKIP. They are not replayed, they are
+listed separately as "expected-inconclusive (documented limitation)", and they never make the gate
+INCONCLUSIVE. --run-blocked replays them anyway. An ERROR is still EXPECTED_SKIP, but a FAIL on one
+is a real BREAKAGE/REAPPEARED, since the limitation has evidently been lifted.
+
 A fix is "claimed" when the exploit's VulnerabilityReport is RESOLVED or has
 fix_validated_against_version set, or when --claimed-fix names its case_id or vuln_id
 (also via AEP_CLAIMED_FIXES, comma-separated, or --all-claimed). An exploit that is still FAIL
@@ -22,8 +28,9 @@ hasn't said it fixed it.
 Exit codes:
   0  PASS
   1  FAIL          at least one REAPPEARED, STILL_VULNERABLE or BREAKAGE
-  2  INCONCLUSIVE  a gated case errored or wasn't judged, the gated suite is empty, or the target
+  2  INCONCLUSIVE  a gated case errored or wasn't judged, no gated case can run, or the target
                    version could not be determined. --allow-errors turns the first two into PASS.
+                   EXPECTED_SKIP cases never count here.
 
 Target version: --target-version, else $AEP_TARGET_VERSION, else polled live from the target
 (TargetClient.target_version). The previous version is --previous-version, else the most recent
@@ -50,6 +57,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from aep.agents.orchestrator import Orchestrator, VERDICT_RANK  # noqa: E402
+from aep.limitations import expected_inconclusive  # noqa: E402
 from contracts.contracts import (  # noqa: E402
     AttackCase, AttackRun, ConversationTurn, JudgeVerdict, ReportStatus, Verdict, VulnerabilityReport,
 )
@@ -88,16 +96,18 @@ class GatedCase:
     case: AttackCase
     kind: str                       # exploit | control
     history: dict[str, Verdict]     # before the replay
+    blocked: Optional[str] = None   # documented known limitation (expected inconclusive)
 
 
 def select_suite(store: Any) -> list[GatedCase]:
     suite = []
     for case in store.list_cases(in_regression=True):
         history = verdict_history(store, case.case_id)
+        blocked = expected_inconclusive(case)
         if is_positive_control(case):
-            suite.append(GatedCase(case, "control", history))
+            suite.append(GatedCase(case, "control", history, blocked))
         elif Verdict.FAIL in history.values():
-            suite.append(GatedCase(case, "exploit", history))
+            suite.append(GatedCase(case, "exploit", history, blocked))
     return suite
 
 
@@ -173,6 +183,7 @@ class GateRow:
     claim: str = ""
     history: dict = field(default_factory=dict)
     note: str = ""
+    limitation: str = ""    # documented reason, for EXPECTED_SKIP
 
 
 @dataclass
@@ -198,9 +209,10 @@ def _val(v: Optional[Verdict]) -> Optional[str]:
     return v.value if v is not None else None
 
 
-def classify(kind: str, previous: Optional[Verdict], current: Optional[Verdict], claimed: bool) -> str:
+def classify(kind: str, previous: Optional[Verdict], current: Optional[Verdict], claimed: bool,
+             blocked: bool = False) -> str:
     if current is None or current == Verdict.ERROR:
-        return "INCONCLUSIVE"
+        return "EXPECTED_SKIP" if blocked else "INCONCLUSIVE"
     if kind == "control":
         return "BREAKAGE" if current == Verdict.FAIL else "OK"
     if current == Verdict.FAIL:
@@ -214,20 +226,24 @@ def classify(kind: str, previous: Optional[Verdict], current: Optional[Verdict],
 
 def run_gate(store: Any, target_version: str, *, previous_version: Optional[str] = None,
              red_team: Any = None, judge: Any = None, tracer: Any = None,
-             claimed: Iterable[str] = (), all_claimed: bool = False, allow_errors: bool = False) -> GateResult:
+             claimed: Iterable[str] = (), all_claimed: bool = False, allow_errors: bool = False,
+             run_blocked: bool = False) -> GateResult:
     suite = select_suite(store)
     if not suite:
         return _finish(target_version, previous_version, [], allow_errors,
                        empty="no confirmed exploits or positive controls in the regression suite")
     ids = [g.case.case_id for g in suite]
+    replay_ids = [g.case.case_id for g in suite if run_blocked or not g.blocked]
     prev = previous_version or pick_previous_version(store, suite, target_version)
     claims = fix_claims(store, claimed, all_claimed, ids)
 
-    injected = red_team is not None and judge is not None
-    orch = Orchestrator(SuiteView(store, ids), red_team=red_team, judge=judge, tracer=tracer,
-                        last_seen_version=prev, default_agents=not injected,
-                        session_id="regression_gate")
-    outcomes = {o.case_id: o for o in orch.run_regression(target_version, previous_version=prev)}
+    outcomes = {}
+    if replay_ids:
+        injected = red_team is not None and judge is not None
+        orch = Orchestrator(SuiteView(store, replay_ids), red_team=red_team, judge=judge, tracer=tracer,
+                            last_seen_version=prev, default_agents=not injected,
+                            session_id="regression_gate")
+        outcomes = {o.case_id: o for o in orch.run_regression(target_version, previous_version=prev)}
 
     rows = []
     for g in suite:
@@ -237,7 +253,7 @@ def run_gate(store: Any, target_version: str, *, previous_version: Optional[str]
         current = _worst(v.verdict for rid in (o.run_ids if o else []) for v in store.list_verdicts(run_id=rid))
         if current is None and o is not None and o.run_ids:
             current = o.current
-        note = o.note if o else "not replayed"
+        note = o.note if o else ("not replayed: expected-inconclusive" if g.blocked else "not replayed")
         if prev in g.history:
             previous, prev_label = g.history[prev], prev
         elif g.history:  # never run at the chosen previous version: compare with its latest record
@@ -245,12 +261,13 @@ def run_gate(store: Any, target_version: str, *, previous_version: Optional[str]
             previous = g.history[prev_label]
         else:
             previous, prev_label = None, None
-        status = classify(g.kind, previous, current, cid in claims)
+        status = classify(g.kind, previous, current, cid in claims, blocked=bool(g.blocked))
         rows.append(GateRow(
             case_id=cid, kind=g.kind, category=g.case.category.value,
             severity=g.case.severity_if_success.value, previous_version=prev_label,
             previous=_val(previous), current=_val(current), status=status, gating=status in GATING,
             claim=claims.get(cid, ""), history={k: v.value for k, v in g.history.items()}, note=note,
+            limitation=g.blocked or "",
         ))
     return _finish(target_version, prev, rows, allow_errors)
 
@@ -258,6 +275,9 @@ def run_gate(store: Any, target_version: str, *, previous_version: Optional[str]
 def _finish(target_version, prev, rows, allow_errors, empty: str = "") -> GateResult:
     failing = [r for r in rows if r.gating]
     unknown = [r for r in rows if r.status == "INCONCLUSIVE"]
+    expected = [r for r in rows if r.status == "EXPECTED_SKIP"]
+    if rows and len(expected) == len(rows):
+        empty = "every gated case is expected-inconclusive (documented limitation); nothing could run"
     if failing:
         outcome, code = "FAIL", EXIT_FAIL
         reason = "; ".join(f"{r.status} {r.case_id}" for r in failing)
@@ -270,6 +290,8 @@ def _finish(target_version, prev, rows, allow_errors, empty: str = "") -> GateRe
         reason = empty or "no reappeared exploit, no unfixed claimed fix, no positive-control breakage"
         if unknown:
             reason += f" ({len(unknown)} inconclusive, allowed)"
+        if expected and not empty:
+            reason += f"; {len(expected)} expected-inconclusive (documented limitation)"
     return GateResult(target_version, prev, rows, outcome, code, reason)
 
 
@@ -282,9 +304,11 @@ def render(result: GateResult) -> str:
         f"REGRESSION GATE  target={result.target_version}  previous={result.previous_version}",
         "=" * 96,
     ]
-    if result.rows:
+    checked = [r for r in result.rows if r.status != "EXPECTED_SKIP"]
+    skipped = [r for r in result.rows if r.status == "EXPECTED_SKIP"]
+    if checked:
         lines.append(f"{'':2}{'STATUS':17}{'KIND':8}{'PREV':9}{'NOW':9}{'SEV':9}CASE")
-        for r in result.rows:
+        for r in checked:
             mark = "✗" if r.gating else ("?" if r.status == "INCONCLUSIVE" else "✓")
             prev = f"{r.previous or '-'}"
             lines.append(f"{mark:2}{r.status:17}{r.kind:8}{prev:9}{(r.current or '-'):9}{r.severity:9}{r.case_id}")
@@ -297,6 +321,11 @@ def render(result: GateResult) -> str:
                 detail.append(r.note)
             for d in detail:
                 lines.append(f"{'':27}{d}")
+    if skipped:
+        lines += ["", "expected-inconclusive (documented limitation), not gated:"]
+        for r in skipped:
+            lines.append(f"- {r.kind:8}{r.case_id}")
+            lines.append(f"{'':10}{r.limitation}")
     counts: dict[str, int] = {}
     for r in result.rows:
         counts[r.status] = counts.get(r.status, 0) + 1
@@ -416,6 +445,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="treat this exploit's fix as claimed (repeatable)")
     ap.add_argument("--all-claimed", action="store_true", help="treat every confirmed exploit as claimed fixed")
     ap.add_argument("--allow-errors", action="store_true", help="errored/unjudged gated cases don't block")
+    ap.add_argument("--run-blocked", action="store_true",
+                    help="also replay cases tagged expected-inconclusive (documented limitation)")
     ap.add_argument("--report", metavar="PATH", help="also write the gate result as JSON")
     ap.add_argument("--demo", choices=sorted(DEMO_SCENARIOS), help="offline simulated scenario (no target)")
     args = ap.parse_args(argv)
@@ -446,7 +477,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     result = run_gate(store, target_version, previous_version=args.previous_version, red_team=red_team,
                       judge=judge, tracer=tracer, claimed=claimed, all_claimed=args.all_claimed,
-                      allow_errors=args.allow_errors)
+                      allow_errors=args.allow_errors, run_blocked=args.run_blocked)
     print(render(result))
     if args.report:
         Path(args.report).write_text(json.dumps(result.to_json(), indent=2))

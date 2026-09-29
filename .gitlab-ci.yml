@@ -21,7 +21,9 @@ secret_detection:
 
 # ---- Regression gate (scripts/regression_gate.py) --------------------------------------------
 # Exit 0 PASS, 1 FAIL (reappeared exploit / claimed fix still FAIL / positive-control breakage),
-# 2 INCONCLUSIVE (target unreachable, gated case errored, empty suite).
+# 2 INCONCLUSIVE (target unreachable, gated case errored, empty suite). Seeds tagged
+# oracle_config.known_limitation (write-back ACL-blocked, ingestion pending: the ea-* and
+# ipi-02/05/06 seeds) are EXPECTED_SKIP. They are listed but not replayed, and they don't block.
 
 # Offline self-test, no secrets: a simulated reappeared exploit must turn the gate red and a
 # validated fix must leave it green.
@@ -37,7 +39,8 @@ regression_gate_selftest:
 # Live gate: replays the confirmed exploits + positive controls against the deployed target.
 # Needs the .env.example variables as masked CI/CD variables (TARGET_*, JUDGE_MODEL, API keys).
 # The store is carried between pipelines in the cache, because the gate compares against verdicts
-# recorded at earlier target versions. Name claimed fixes with AEP_CLAIMED_FIXES (comma-separated
+# recorded at earlier target versions. load_seeds re-upserts the case definitions every run, so the
+# cached store picks up seed changes (for example known_limitation tags) and keeps its runs and verdicts. Name claimed fixes with AEP_CLAIMED_FIXES (comma-separated
 # case or vuln ids), or mark the report RESOLVED in the store.
 regression_gate:
   stage: regression
@@ -52,7 +55,7 @@ regression_gate:
     policy: pull-push
   before_script:
   - pip install --quiet pydantic httpx
-  - test -f seeds.db || python3 scripts/load_seeds.py --insert --db seeds.db
+  - python3 scripts/load_seeds.py --insert --db seeds.db
   script:
   - python3 scripts/regression_gate.py --db seeds.db --report regression_gate.json
   artifacts:

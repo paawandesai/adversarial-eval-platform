@@ -79,6 +79,12 @@ verdicts recorded at the previous target version. It exits 1 if an exploit reapp
 fix is still FAIL, or if a positive control broke. It exits 2 if the result is inconclusive. CI runs
 it as the `regression_gate` job in `.gitlab-ci.yml`.
 
+Seeds tagged `oracle_config.known_limitation` (see `aep/limitations.py`) are expected to be
+inconclusive on the current test host: the `excessive_agency_writeback` seeds (write-back is
+ACL-blocked) and `seed-ipi-02`/`05`/`06` (document ingestion pending). The gate lists them as
+EXPECTED_SKIP without replaying them, `run_campaign_seeds.py` skips them (`--include-blocked` runs
+them anyway), and the dashboard counts their ERROR verdicts as *skipped* rather than *error*.
+
 ```bash
 python3 scripts/regression_gate.py --db seeds.db                    # live target
 python3 scripts/regression_gate.py --db seeds.db --claimed-fix seed-authz-07-brief-cross-patient

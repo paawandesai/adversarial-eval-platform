@@ -39,12 +39,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from aep.agents.documentation import REVIEW_SEVERITIES  # noqa: E402
 from aep import health  # noqa: E402
 from aep.agents.judge import needs_human_review  # noqa: E402
+from aep.limitations import expected_map  # noqa: E402
 from aep.store.sqlite_store import _WORST_RANK, SqliteStore  # noqa: E402
 from contracts.contracts import (  # noqa: E402
     AttackCase, AttackCategory, AttackRun, JudgeVerdict, OracleType, Severity, Verdict, VulnerabilityReport,
 )
 
-OUTCOMES = ("pass", "partial", "fail", "error")  # run outcome buckets, plus "unjudged" where it applies
+# Run outcome buckets, plus "unjudged" where it applies. "skipped" is an ERROR on a case whose seed documents it
+# as expected-inconclusive (aep.limitations): shown apart so it doesn't read as a platform error.
+OUTCOMES = ("pass", "partial", "fail", "error", "skipped")
 SEVERITY_ORDER = {Severity.CRITICAL: 0, Severity.HIGH: 1, Severity.MEDIUM: 2, Severity.LOW: 3, Severity.INFO: 4}
 FEED_LIMIT = 100
 
@@ -87,6 +90,11 @@ def worst_by_run(verdicts: Iterable[JudgeVerdict]) -> dict[str, Verdict]:
     return out
 
 
+def outcome(verdict: str, case_id: str, expected: Mapping[str, str]) -> str:
+    """The displayed bucket for a verdict value: ERROR on a documented-limitation case is "skipped"."""
+    return "skipped" if verdict == Verdict.ERROR.value and case_id in expected else verdict
+
+
 def _short(text: str, limit: int = 140) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -100,10 +108,11 @@ def _plural(n: int, word: str) -> str:
 # Aggregations
 # --------------------------------------------------------------------------- #
 def header_stats(runs: list[AttackRun], verdicts: list[JudgeVerdict],
-                 reports: list[VulnerabilityReport]) -> dict[str, Any]:
+                 reports: list[VulnerabilityReport], expected: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
     """Verdict counts are per verdict row. Latency is end-to-end per run (sum of its steps); runs with no
     recorded steps are left out of the percentiles rather than counted as 0 ms."""
-    counts = Counter(v.verdict.value for v in verdicts)
+    expected = expected or {}
+    counts = Counter(outcome(v.verdict.value, v.case_id, expected) for v in verdicts)
     totals = [sum(r.latency_ms_by_step.values()) for r in runs if r.latency_ms_by_step]
     return {
         "runs": len(runs),
@@ -122,15 +131,18 @@ def coverage_matrix(coverage: Mapping[str, Mapping[str, Any]], cases: list[Attac
     """One row per AttackCategory (enum order), zero-coverage ones included and flagged ``gap``.
 
     runs/pass/fail/partial/cost_usd come from store.coverage(). It has no error bucket, so ``error`` (runs whose
-    only verdicts are ERROR) and ``unjudged`` (the rest) are derived here with the same worst-verdict rule.
+    only verdicts are ERROR), ``skipped`` (those runs on expected-inconclusive cases) and ``unjudged`` (the
+    rest) are derived here with the same worst-verdict rule.
     """
     case_by_id = {c.case_id: c for c in cases}
+    expected = expected_map(cases)
     worst = worst_by_run(verdicts)
     errors: Counter = Counter()
+    skipped: Counter = Counter()
     for r in runs:
         case = case_by_id.get(r.case_id)
         if case is not None and worst.get(r.run_id) == Verdict.ERROR:
-            errors[case.category.value] += 1
+            (skipped if case.case_id in expected else errors)[case.category.value] += 1
     n_cases = Counter(c.category.value for c in cases)
     n_regression = Counter(c.category.value for c in cases if c.in_regression_suite)
 
@@ -149,9 +161,10 @@ def coverage_matrix(coverage: Mapping[str, Mapping[str, Any]], cases: list[Attac
             "fail": int(cov.get("fail", 0)),
             "partial": int(cov.get("partial", 0)),
             "error": errors.get(cat, 0),
+            "skipped": skipped.get(cat, 0),
             "cost_usd": float(cov.get("cost_usd", 0.0)),
         }
-        row["unjudged"] = max(count - row["pass"] - row["fail"] - row["partial"] - row["error"], 0)
+        row["unjudged"] = max(count - row["pass"] - row["fail"] - row["partial"] - row["error"] - row["skipped"], 0)
         row["gap"] = count == 0
         rows.append(row)
     return rows
@@ -203,20 +216,29 @@ def evidence_summary(v: JudgeVerdict) -> str:
 
 
 def verdict_feed(verdicts: list[JudgeVerdict], env: Mapping[str, str],
-                 limit: int = FEED_LIMIT) -> list[dict[str, Any]]:
-    """Most recent first (evaluated_at), capped at ``limit``."""
+                 limit: int = FEED_LIMIT, expected: Optional[Mapping[str, str]] = None) -> list[dict[str, Any]]:
+    """Most recent first (evaluated_at), capped at ``limit``. A skipped row's evidence leads with the
+    documented reason."""
+    expected = expected or {}
     recent = sorted(verdicts, key=lambda v: v.evaluated_at, reverse=True)[:limit]
-    return [{
-        "evaluated_at": v.evaluated_at,
-        "verdict": v.verdict.value,
-        "oracle_used": v.oracle_used.value,
-        "case_id": v.case_id,
-        "run_id": v.run_id,
-        "correlation_id": v.correlation_id,
-        "needs_human_review": needs_human_review(v),
-        "evidence": evidence_summary(v),
-        "trace_url": langfuse_trace_url(v.correlation_id, env),
-    } for v in recent]
+    rows = []
+    for v in recent:
+        shown = outcome(v.verdict.value, v.case_id, expected)
+        evidence = evidence_summary(v)
+        if shown == "skipped":
+            evidence = _short(f"expected-inconclusive: {expected[v.case_id]} · {evidence}")
+        rows.append({
+            "evaluated_at": v.evaluated_at,
+            "verdict": shown,
+            "oracle_used": v.oracle_used.value,
+            "case_id": v.case_id,
+            "run_id": v.run_id,
+            "correlation_id": v.correlation_id,
+            "needs_human_review": needs_human_review(v),
+            "evidence": evidence,
+            "trace_url": langfuse_trace_url(v.correlation_id, env),
+        })
+    return rows
 
 
 def load_reviews(store: Any) -> dict[str, bool]:
@@ -278,12 +300,14 @@ def findings_table(reports: list[VulnerabilityReport], runs: list[AttackRun], ve
     return rows
 
 
-def version_breakdown(runs: list[AttackRun], verdicts: list[JudgeVerdict]) -> list[dict[str, Any]]:
+def version_breakdown(runs: list[AttackRun], verdicts: list[JudgeVerdict],
+                      expected: Optional[Mapping[str, str]] = None) -> list[dict[str, Any]]:
     """Run outcomes per target_version, oldest version first (by its earliest run).
 
     ``regressions`` / ``fixes`` compare each version with the one before it, over cases run at both:
     a case whose worst verdict went PASS -> FAIL regressed; FAIL -> PASS is a fix.
     """
+    expected = expected or {}
     worst = worst_by_run(verdicts)
     by_version: dict[str, list[AttackRun]] = defaultdict(list)
     for r in runs:
@@ -293,7 +317,8 @@ def version_breakdown(runs: list[AttackRun], verdicts: list[JudgeVerdict]) -> li
     rows, prev_cases = [], None
     for ver in order:
         vruns = by_version[ver]
-        outcome = Counter(worst[r.run_id].value if r.run_id in worst else "unjudged" for r in vruns)
+        mix = Counter(outcome(worst[r.run_id].value, r.case_id, expected) if r.run_id in worst else "unjudged"
+                      for r in vruns)
         case_worst: dict[str, Verdict] = {}
         for r in vruns:
             w = worst.get(r.run_id)
@@ -303,7 +328,7 @@ def version_breakdown(runs: list[AttackRun], verdicts: list[JudgeVerdict]) -> li
             "target_version": ver,
             "runs": len(vruns),
             "cases": len({r.case_id for r in vruns}),
-            **{k: outcome.get(k, 0) for k in (*OUTCOMES, "unjudged")},
+            **{k: mix.get(k, 0) for k in (*OUTCOMES, "unjudged")},
             "cost_usd": sum(r.cost_usd for r in vruns),
             "first_run": min(r.started_at for r in vruns),
             "regressions": None, "fixes": None,
@@ -326,17 +351,18 @@ def build(store: Any, env: Optional[Mapping[str, str]] = None, reviews: Optional
     cases, runs = store.list_cases(), store.list_runs()
     verdicts, reports = store.list_verdicts(), store.list_reports()
     reviews = load_reviews(store) if reviews is None else reviews
+    expected = expected_map(cases)
     return {
         "generated_at": datetime.now(timezone.utc),
         "source": source,
         "notice": notice,
         "langfuse_linked": langfuse_trace_url("x", env) is not None,
-        "stats": header_stats(runs, verdicts, reports),
+        "stats": header_stats(runs, verdicts, reports, expected),
         "coverage": coverage_matrix(store.coverage(), cases, runs, verdicts),
-        "feed": verdict_feed(verdicts, env),
+        "feed": verdict_feed(verdicts, env, expected=expected),
         "feed_total": len(verdicts),
         "findings": findings_table(reports, runs, verdicts, reviews, env),
-        "versions": version_breakdown(runs, verdicts),
+        "versions": version_breakdown(runs, verdicts, expected),
     }
 
 
@@ -381,6 +407,7 @@ tr.gap td{background:var(--gapbg)}tr.gap td.cat{font-weight:600}
 .chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--ink)}
 .chip::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--c,var(--neutral))}
 .c-pass{--c:var(--good)}.c-fail{--c:var(--crit)}.c-partial{--c:var(--warn)}.c-error{--c:var(--neutral)}
+.c-skipped{--c:var(--unjudged)}
 .c-critical{--c:var(--crit)}.c-high{--c:var(--serious)}.c-medium{--c:var(--warn)}.c-low,.c-info{--c:var(--neutral)}
 .c-gap{--c:var(--serious)}
 .flag{font-size:11px;border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--ink2)}
@@ -392,6 +419,7 @@ tr.gap td{background:var(--gapbg)}tr.gap td.cat{font-weight:600}
 .bar .empty{flex:1;background:var(--unjudged);opacity:.5;border-radius:4px}
 .s-pass{background:var(--good)}.s-partial{background:var(--warn)}.s-fail{background:var(--crit)}
 .s-error{background:var(--neutral)}.s-unjudged{background:var(--unjudged)}
+.s-skipped{background:repeating-linear-gradient(45deg,var(--neutral) 0 2px,var(--unjudged) 2px 5px)}
 .legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--ink2)}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
 a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
@@ -426,7 +454,8 @@ if(f){f.addEventListener('change',function(){
 """
 
 _OUTCOME_LABELS = {"pass": "pass — defended", "partial": "partial", "fail": "fail — attack succeeded",
-                   "error": "error", "unjudged": "unjudged"}
+                   "error": "error", "skipped": "skipped — expected (documented limitation)",
+                   "unjudged": "unjudged"}
 
 
 def _e(value: Any) -> str:
@@ -506,7 +535,7 @@ def _coverage(rows: list[dict[str, Any]]) -> str:
         f'Run outcome = worst verdict across its oracles.</div></div>{_legend()}</div>'
         '<div class="scroll"><table class="sortable"><thead><tr><th>Category</th><th class="n">Cases</th>'
         '<th class="n">In regression</th><th class="n">Runs</th><th class="n">Pass</th><th class="n">Partial</th>'
-        '<th class="n">Fail</th><th class="n">Error</th><th class="n">Unjudged</th><th class="n">Cost</th>'
+        '<th class="n">Fail</th><th class="n">Error</th><th class="n">Skipped</th><th class="n">Unjudged</th><th class="n">Cost</th>'
         f'<th>Outcome mix</th></tr></thead><tbody>{body}</tbody></table></div></section>')
 
 
@@ -574,7 +603,7 @@ def _versions(rows: list[dict[str, Any]]) -> str:
         f'(pass → fail, fail → pass).</div></div>{_legend()}</div>'
         '<div class="scroll"><table class="sortable"><thead><tr><th>Version</th><th>First run</th><th class="n">Cases</th>'
         '<th class="n">Runs</th><th class="n">Pass</th><th class="n">Partial</th><th class="n">Fail</th>'
-        '<th class="n">Error</th><th class="n">Unjudged</th><th class="n">Fail rate</th><th class="n">Regressions</th>'
+        '<th class="n">Error</th><th class="n">Skipped</th><th class="n">Unjudged</th><th class="n">Fail rate</th><th class="n">Regressions</th>'
         f'<th class="n">Fixes</th><th>Outcome mix</th></tr></thead><tbody>{body}</tbody></table></div></section>')
 
 
@@ -634,7 +663,7 @@ def generate(db: str, watch: bool = False, interval_s: float = 3.0) -> str:
 
 def _aggregates(store: Any, db: str, notice: str = "") -> dict[str, Any]:
     runs, verdicts, reports = store.list_runs(), store.list_verdicts(), store.list_reports()
-    stats = header_stats(runs, verdicts, reports)
+    stats = header_stats(runs, verdicts, reports, expected_map(store.list_cases()))
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": db,

@@ -166,3 +166,75 @@ def test_script_exit_code(tmp_path, scenario, code):
 
 def test_missing_store_is_inconclusive(tmp_path):
     assert gate.main(["--db", str(tmp_path / "nope.db"), "--target-version", "v1"]) == gate.EXIT_INCONCLUSIVE
+
+
+# --------------------------------------------------------------------------- documented limitations
+
+BLOCKED = {"expected": "inconclusive", "reason": "write-back ACL-blocked", "ref": "THREAT_MODEL.md section 7"}
+
+
+def blocked_control(case_id):
+    c = case(case_id, control=True)
+    return c.model_copy(update={"oracle_config": {"positive_control": True, "known_limitation": BLOCKED}})
+
+
+@pytest.fixture
+def live_like(store):
+    """The live store's shape: a known-open exploit, a runnable control, two blocked controls that ERROR."""
+    record(store, "exploit", "v1", Verdict.FAIL)
+    for cid in ("ea-06", "ipi-06"):
+        store.add_case(blocked_control(cid))
+        record(store, cid, "v1", Verdict.ERROR)
+    return store
+
+
+def test_blocked_controls_are_expected_skip_and_gate_passes(live_like):
+    result, red_team, rows = run(live_like, "v1", {"exploit": Verdict.FAIL, "control": Verdict.PASS})
+
+    assert result.exit_code == gate.EXIT_PASS and result.outcome == "PASS"
+    assert sorted(red_team.replayed) == ["control", "exploit"]  # blocked controls are not replayed
+    assert rows["ea-06"].status == rows["ipi-06"].status == "EXPECTED_SKIP"
+    assert not rows["ea-06"].gating and "ACL-blocked" in rows["ea-06"].limitation
+    assert rows["exploit"].status == "KNOWN_OPEN" and rows["control"].status == "OK"
+    assert "2 expected-inconclusive" in result.reason
+    text = gate.render(result)
+    checked, _, listed = text.partition("expected-inconclusive (documented limitation)")
+    assert "ea-06" not in checked and "ea-06" in listed and "GATE: PASS" in listed
+
+
+def test_untagged_erroring_control_is_still_inconclusive(live_like):
+    live_like.add_case(case("other-control", control=True))
+    result, _, rows = run(live_like, "v1", {"exploit": Verdict.FAIL, "other-control": Verdict.ERROR})
+    assert result.exit_code == gate.EXIT_INCONCLUSIVE and rows["other-control"].status == "INCONCLUSIVE"
+
+
+def test_real_failures_still_fail_alongside_blocked_controls(live_like):
+    record(live_like, "exploit", "v1", Verdict.PASS)  # worst at v1 stays FAIL: no reappearance
+    report(live_like, "exploit", ReportStatus.RESOLVED)
+    result, _, rows = run(live_like, "v2", {"exploit": Verdict.FAIL, "control": Verdict.FAIL})
+    assert result.exit_code == gate.EXIT_FAIL
+    assert rows["exploit"].status == "STILL_VULNERABLE" and rows["control"].status == "BREAKAGE"
+
+
+def test_run_blocked_replays_them_and_a_fail_is_real_breakage(live_like):
+    result, red_team, rows = run(live_like, "v2", {"ea-06": Verdict.FAIL, "ipi-06": Verdict.ERROR},
+                                 run_blocked=True)
+    assert "ea-06" in red_team.replayed and "ipi-06" in red_team.replayed
+    assert rows["ea-06"].status == "BREAKAGE" and rows["ipi-06"].status == "EXPECTED_SKIP"
+    assert result.exit_code == gate.EXIT_FAIL
+
+
+def test_only_blocked_cases_is_inconclusive():
+    s = SqliteStore(":memory:")
+    s.add_case(blocked_control("ea-06"))
+    result, red_team, _ = run(s, "v1", {})
+    assert red_team.replayed == [] and result.exit_code == gate.EXIT_INCONCLUSIVE
+
+
+def test_seed_tags_cover_only_the_documented_blocked_cases():
+    """ea-* (write-back ACL-blocked) and ipi-02/05/06 (ingestion pending); never authz, never the ipi cases that
+    reach a verdict."""
+    from aep.limitations import expected_map
+    seeds = [AttackCase.model_validate_json(p.read_text()) for p in (ROOT / "evals" / "seeds").glob("*/*.json")]
+    tagged = {"-".join(cid.split("-")[:3]) for cid in expected_map(seeds)}
+    assert tagged == {f"seed-ea-0{i}" for i in range(1, 7)} | {"seed-ipi-02", "seed-ipi-05", "seed-ipi-06"}

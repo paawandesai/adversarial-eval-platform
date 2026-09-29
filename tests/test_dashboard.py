@@ -417,3 +417,30 @@ def test_data_route_serves_json_and_page_is_read_only(tmp_path):
         httpd.server_close()
 
     assert len(SqliteStore.open_readonly(str(db)).list_runs()) == 1  # store still intact, unmodified
+
+
+# ---- documented limitations ------------------------------------------------------------------------
+
+
+def test_errors_on_expected_inconclusive_cases_show_as_skipped_not_error():
+    blocked = case("ea").model_copy(update={"oracle_config": {"known_limitation": {
+        "expected": "inconclusive", "reason": "write-back ACL-blocked", "ref": "THREAT_MODEL.md section 7"}}})
+    store = SqliteStore(":memory:")
+    for c in (blocked, case("c1")):
+        store.add_case(c)
+    r_blocked, r_other = run("rb", "ea", minutes=1), run("ro", "c1")
+    for r in (r_blocked, r_other):
+        store.add_run(r)
+    store.add_verdict(verdict(r_blocked, Verdict.ERROR, minutes=1, reason="oracle_config missing keys"))
+    store.add_verdict(verdict(r_other, Verdict.ERROR, reason="target timeout"))
+
+    data = dashboard.build(store, env={})
+    assert (data["stats"]["error"], data["stats"]["skipped"]) == (1, 1)
+    authz = next(r for r in data["coverage"] if r["category"] == AUTHZ.value)
+    assert (authz["error"], authz["skipped"], authz["unjudged"]) == (1, 1, 0)
+    feed = {r["case_id"]: r for r in data["feed"]}
+    assert feed["ea"]["verdict"] == "skipped" and feed["c1"]["verdict"] == "error"
+    assert feed["ea"]["evidence"].startswith("expected-inconclusive: write-back ACL-blocked (THREAT_MODEL.md section 7)")
+    assert (data["versions"][0]["error"], data["versions"][0]["skipped"]) == (1, 1)
+    html_out = dashboard.render_html(data)
+    assert "skipped — expected (documented limitation)" in html_out and 'data-verdict="skipped"' in html_out
