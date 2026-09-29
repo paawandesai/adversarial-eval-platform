@@ -4,3 +4,4 @@ seeds.db
 seeds.db-shm
 seeds.db-wal
 .DS_Store
+dashboard.html

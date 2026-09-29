@@ -1,4 +1,5 @@
 import inspect
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -101,6 +102,29 @@ def test_schema_version_recorded_and_reopen_is_idempotent(tmp_path):
     with SqliteStore(path) as s:  # reopening re-runs _migrate without harm, and data survives
         assert s.schema_version == 1
         assert s.get_case(case.case_id) == case
+
+
+def test_open_readonly_reads_but_never_writes(tmp_path):
+    path = str(tmp_path / "store.db")
+    with SqliteStore(path) as s:
+        case = make_case()
+        s.add_case(case)
+    with SqliteStore.open_readonly(path) as ro:
+        assert ro.get_case(case.case_id) == case
+        assert ro.coverage()[CAT_PI.value]["count"] == 0
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            ro.add_case(make_case())
+    with pytest.raises(sqlite3.OperationalError):  # never creates a missing file
+        SqliteStore.open_readonly(str(tmp_path / "missing.db"))
+    assert not (tmp_path / "missing.db").exists()
+
+
+def test_open_readonly_refuses_newer_layout(tmp_path):
+    path = str(tmp_path / "store.db")
+    with SqliteStore(path) as s:
+        s._set_meta("schema_version", str(SCHEMA_VERSION + 1))
+    with pytest.raises(RuntimeError, match="newer"):
+        SqliteStore.open_readonly(path)
 
 
 def test_migration_adds_column_without_data_loss(tmp_path, monkeypatch):

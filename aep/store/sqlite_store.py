@@ -36,6 +36,7 @@ To add a field without losing data (e.g. ``AttackRun.redteam_model`` as a querya
 """
 from __future__ import annotations
 
+import pathlib
 import sqlite3
 import threading
 import uuid
@@ -164,6 +165,25 @@ class SqliteStore:
         if path != ":memory:":
             self._conn.execute("PRAGMA journal_mode=WAL")
         self._migrate()
+
+    @classmethod
+    def open_readonly(cls, path: str) -> "SqliteStore":
+        """Open an existing database for reads only (dashboards, reports).
+
+        Skips migrations and meta writes, and SQLite itself rejects any write (``mode=ro``). Raises
+        ``sqlite3.OperationalError`` if the file is missing, and ``RuntimeError`` if its layout is newer than
+        this code, since reading it could silently misinterpret columns.
+        """
+        store = cls.__new__(cls)
+        uri = pathlib.Path(path).resolve().as_uri() + "?mode=ro"
+        store._conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None)
+        store._conn.row_factory = sqlite3.Row
+        store._lock = threading.RLock()
+        found = store.schema_version
+        if found > SCHEMA_VERSION:
+            store.close()
+            raise RuntimeError(f"{path}: schema_version {found} is newer than {SCHEMA_VERSION}")
+        return store
 
     # ---- lifecycle -------------------------------------------------------------------------------
 

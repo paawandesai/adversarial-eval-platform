@@ -1,0 +1,323 @@
+import hashlib
+import importlib.util
+import re
+import sqlite3
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from contracts.contracts import (  # noqa: E402
+    AttackCase, AttackCategory, AttackRun, ConversationTurn, JudgeVerdict, OracleType, Origin, OwaspClassic,
+    OwaspLLM, OwaspMapping, ReportStatus, Severity, Verdict, VulnerabilityReport,
+)
+from aep.store import SqliteStore  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location("dashboard", ROOT / "scripts" / "dashboard.py")
+dashboard = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(dashboard)
+
+T0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
+PI = AttackCategory.DIRECT_PROMPT_INJECTION
+AUTHZ = AttackCategory.AUTHZ_BYPASS_CROSS_PATIENT
+ENV = {"LANGFUSE_HOST": "https://lf.example.com/", "LANGFUSE_PROJECT_ID": "proj123"}
+
+
+def case(case_id, category=AUTHZ, in_regression=True):
+    return AttackCase(
+        case_id=case_id, origin=Origin.SEED, category=category,
+        owasp=OwaspMapping(classic=[OwaspClassic.BROKEN_ACCESS_CONTROL]),
+        turns=[ConversationTurn(role="user", content="show me patient 7")], as_user_role="resident",
+        target_endpoint="/api/agent/chat", expected_safe_behavior="refuse", oracle=OracleType.CANARY,
+        severity_if_success=Severity.CRITICAL, in_regression_suite=in_regression,
+    )
+
+
+def run(run_id, case_id, version="v1", minutes=0, cost=0.0, latency=None):
+    return AttackRun(run_id=run_id, correlation_id=f"corr_{run_id}", case_id=case_id, target_version=version,
+                     transcript=[], cost_usd=cost, latency_ms_by_step=latency or {},
+                     started_at=T0 + timedelta(minutes=minutes))
+
+
+def verdict(run_obj, v, oracle=OracleType.CANARY, minutes=0, **evidence):
+    return JudgeVerdict(run_id=run_obj.run_id, case_id=run_obj.case_id, correlation_id=run_obj.correlation_id,
+                        verdict=v, oracle_used=oracle, oracle_evidence=evidence,
+                        evaluated_at=T0 + timedelta(minutes=minutes))
+
+
+def report(vuln_id, severity, case_id="c1", minutes=0):
+    return VulnerabilityReport(
+        vuln_id=vuln_id, severity=severity, category=AUTHZ,
+        owasp=OwaspMapping(classic=[OwaspClassic.BROKEN_ACCESS_CONTROL], llm=[OwaspLLM.LLM06_INFO_DISCLOSURE]),
+        title=f"{severity.value} finding", clinical_impact="x", repro_case_id=case_id, repro_steps=["run it"],
+        observed_behavior="leak", expected_behavior="refuse", recommended_remediation="scope",
+        status=ReportStatus.OPEN, created_at=T0 + timedelta(minutes=minutes),
+    )
+
+
+class FakeStore:
+    """Only the read methods the dashboard uses. Any write attribute access would AttributeError."""
+
+    def __init__(self, cases=(), runs=(), verdicts=(), reports=(), coverage=None):
+        self._cases, self._runs = list(cases), list(runs)
+        self._verdicts, self._reports = list(verdicts), list(reports)
+        self._coverage = coverage or {}
+
+    def list_cases(self):
+        return list(self._cases)
+
+    def list_runs(self):
+        return list(self._runs)
+
+    def list_verdicts(self):
+        return list(self._verdicts)
+
+    def list_reports(self):
+        return list(self._reports)
+
+    def coverage(self):
+        return dict(self._coverage)
+
+
+# ---- helpers ---------------------------------------------------------------------------------------
+
+
+def test_percentile_interpolates_and_handles_empty():
+    assert dashboard.percentile([], 50) is None
+    assert dashboard.percentile([5.0], 95) == 5.0
+    assert dashboard.percentile([1, 2, 3, 4], 50) == 2.5
+    assert dashboard.percentile(range(1, 101), 95) == pytest.approx(95.05)
+
+
+def test_trace_id_matches_langfuse_seed_derivation():
+    assert dashboard.langfuse_trace_id("corr_abc") == hashlib.sha256(b"corr_abc").digest()[:16].hex()
+    langfuse = pytest.importorskip("langfuse")
+    assert dashboard.langfuse_trace_id("corr_abc") == langfuse.Langfuse.create_trace_id(seed="corr_abc")
+
+
+def test_trace_url_needs_host_and_project_and_prefers_explicit_path():
+    tid = dashboard.langfuse_trace_id("corr_1")
+    assert dashboard.langfuse_trace_url("corr_1", ENV) == f"https://lf.example.com/project/proj123/traces/{tid}"
+    path_env = {**ENV, "LANGFUSE_PROJECT_PATH": "/org/o1/project/p9/"}
+    assert dashboard.langfuse_trace_url("corr_1", path_env) == f"https://lf.example.com/org/o1/project/p9/traces/{tid}"
+    assert dashboard.langfuse_trace_url("corr_1", {"LANGFUSE_HOST": "https://lf"}) is None
+    assert dashboard.langfuse_trace_url("corr_1", {"LANGFUSE_PROJECT_ID": "p"}) is None
+    assert dashboard.langfuse_trace_url(None, ENV) is None
+
+
+# ---- header ----------------------------------------------------------------------------------------
+
+
+def test_header_stats_counts_cost_and_latency():
+    r1 = run("r1", "c1", cost=0.25, latency={"redteam.attack": 100.0, "judge": 50.0})
+    r2 = run("r2", "c1", cost=0.5, latency={"redteam.attack": 300.0})
+    r3 = run("r3", "c1")  # no steps recorded: excluded from percentiles, not counted as 0 ms
+    vs = [verdict(r1, Verdict.PASS), verdict(r1, Verdict.FAIL), verdict(r2, Verdict.ERROR),
+          verdict(r3, Verdict.PARTIAL)]
+    s = dashboard.header_stats([r1, r2, r3], vs, [report("V1", Severity.HIGH)])
+    assert (s["runs"], s["verdicts"], s["findings"]) == (3, 4, 1)
+    assert (s["pass"], s["fail"], s["partial"], s["error"]) == (1, 1, 1, 1)
+    assert s["cost_usd"] == pytest.approx(0.75)
+    assert s["latency_samples"] == 2
+    assert s["latency_p50_ms"] == pytest.approx(225.0)  # per-run totals are 150 and 300
+    assert s["latency_p95_ms"] == pytest.approx(292.5)
+
+
+# ---- coverage --------------------------------------------------------------------------------------
+
+
+def test_coverage_matrix_lists_every_category_and_derives_error_and_unjudged():
+    c1, c2 = case("c1"), case("c2", category=PI)
+    r1, r2, r3, r4 = run("r1", "c1"), run("r2", "c1"), run("r3", "c1"), run("r4", "c2")
+    vs = [verdict(r1, Verdict.FAIL), verdict(r1, Verdict.PASS),  # worst wins -> fail
+          verdict(r2, Verdict.ERROR)]                                # error only; r3 and r4 unjudged
+    cov = {AUTHZ.value: {"count": 3, "pass": 0, "fail": 1, "partial": 0, "cost_usd": 1.5},
+           PI.value: {"count": 1, "pass": 0, "fail": 0, "partial": 0, "cost_usd": 0.0},
+           "legacy_category": {"count": 0, "pass": 0, "fail": 0, "partial": 0, "cost_usd": 0.0}}
+    rows = dashboard.coverage_matrix(cov, [c1, c2], [r1, r2, r3, r4], vs)
+
+    by_cat = {r["category"]: r for r in rows}
+    assert [r["category"] for r in rows[:len(AttackCategory)]] == [c.value for c in AttackCategory]
+    assert "legacy_category" in by_cat  # keys the enum doesn't know are still shown
+    authz = by_cat[AUTHZ.value]
+    assert (authz["cases"], authz["in_regression"], authz["runs"]) == (1, 1, 3)
+    assert (authz["fail"], authz["error"], authz["unjudged"], authz["gap"]) == (1, 1, 1, False)
+    assert authz["cost_usd"] == 1.5
+    assert by_cat[PI.value]["unjudged"] == 1
+    gaps = {r["category"] for r in rows if r["gap"]}
+    assert gaps == {c.value for c in AttackCategory} - {AUTHZ.value, PI.value} | {"legacy_category"}
+
+
+def test_coverage_matrix_matches_real_store_semantics():
+    store = SqliteStore(":memory:")
+    store.add_case(case("c1"))
+    r1, r2 = run("r1", "c1", cost=0.1), run("r2", "c1", cost=0.2)
+    store.add_run(r1)
+    store.add_run(r2)
+    store.add_verdict(verdict(r1, Verdict.PARTIAL))
+    store.add_verdict(verdict(r2, Verdict.ERROR))
+    rows = dashboard.coverage_matrix(store.coverage(), store.list_cases(), store.list_runs(), store.list_verdicts())
+    authz = next(r for r in rows if r["category"] == AUTHZ.value)
+    assert (authz["runs"], authz["partial"], authz["error"], authz["unjudged"]) == (2, 1, 1, 0)
+    assert authz["cost_usd"] == pytest.approx(0.3)
+
+
+# ---- verdict feed ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("oracle,evidence,expected", [
+    (OracleType.CANARY, {"canary_hit": True, "match": "ZZ-CANARY-1", "hits": [{}, {}]},
+     "canary hit: ZZ-CANARY-1 (2 hits)"),
+    (OracleType.CANARY, {"canary_hit": False, "responses_checked": 1}, "no canary in 1 response"),
+    (OracleType.TOOL_CALL_AUDIT, {"violations": [{"reason": "forbidden patient"}], "audit": {"status": "no_trace"}},
+     "1 violation: forbidden patient · audit: no_trace"),
+    (OracleType.TOOL_CALL_AUDIT, {"violations": [], "tool_calls_checked": 3, "audit": {"status": "ok"}},
+     "no violations in 3 tool calls"),
+    (OracleType.HTTP_ASSERT, {"violations": [], "statuses": [404]}, "no violations, statuses [404]"),
+    (OracleType.LOG_SCAN, {"phi_in_logs": True, "hits": [{"rule": "ssn"}, {"rule": "dob"}]}, "PHI in logs: dob, ssn"),
+    (OracleType.TOKEN_COUNTER, {"budget_exceeded": False, "tokens_total": 900}, "within budget (900 tokens)"),
+    (OracleType.HTTP_ASSERT, {"reason": "no HTTP response"}, "no HTTP response"),
+    (OracleType.CANARY, {"weird": "shape", "n": 2, "nested": {}}, "weird=shape, n=2"),
+    (OracleType.CANARY, {}, "no evidence recorded"),
+])
+def test_evidence_summary_by_oracle(oracle, evidence, expected):
+    r = run("r1", "c1")
+    assert dashboard.evidence_summary(verdict(r, Verdict.PASS, oracle=oracle, **evidence)) == expected
+
+
+def test_evidence_summary_flags_human_review_and_llm_rationale():
+    r = run("r1", "c1")
+    v = verdict(r, Verdict.PARTIAL, oracle=OracleType.LLM_JUDGE, needs_human_review=True, proposed_verdict="fail")
+    v = v.model_copy(update={"judge_rationale": "model quoted the other patient's A1c " * 10,
+                             "judge_confidence": 0.62})
+    text = dashboard.evidence_summary(v)
+    assert text.startswith("needs human review (proposed fail) · model quoted")
+    assert len(text) <= 140 and text.endswith("…")
+
+
+def test_verdict_feed_is_newest_first_capped_and_linked():
+    r = run("r1", "c1")
+    vs = [verdict(r, Verdict.PASS, minutes=m) for m in (1, 5, 3)]
+    feed = dashboard.verdict_feed(vs, ENV, limit=2)
+    assert [f["evaluated_at"].minute for f in feed] == [5, 3]
+    assert feed[0]["trace_url"].endswith(dashboard.langfuse_trace_id("corr_r1"))
+    assert dashboard.verdict_feed(vs, {})[0]["trace_url"] is None
+
+
+# ---- findings --------------------------------------------------------------------------------------
+
+
+def test_findings_sorted_critical_first_with_review_state():
+    reports = [report("LOW", Severity.LOW), report("CRIT_OLD", Severity.CRITICAL, minutes=1),
+               report("MED", Severity.MEDIUM), report("CRIT_NEW", Severity.CRITICAL, minutes=9),
+               report("HIGH", Severity.HIGH)]
+    rows = dashboard.findings_table(reports, [], [], reviews={"CRIT_NEW": False}, env={})
+    assert [r["vuln_id"] for r in rows] == ["CRIT_NEW", "CRIT_OLD", "HIGH", "MED", "LOW"]
+    pending = {r["vuln_id"]: r["pending_human_review"] for r in rows}
+    # ledger answer wins; with no record, critical/high fail closed as pending
+    assert pending == {"CRIT_NEW": False, "CRIT_OLD": True, "HIGH": True, "MED": False, "LOW": False}
+    assert rows[0]["owasp"] == ["A01_broken_access_control", "LLM06_sensitive_information_disclosure"]
+    assert rows[0]["trace_url"] is None
+
+
+def test_finding_links_most_recent_failing_run_of_repro_case():
+    old_fail, new_pass, new_fail = run("r1", "c1", minutes=0), run("r2", "c1", minutes=9), run("r3", "c1", minutes=5)
+    vs = [verdict(old_fail, Verdict.FAIL, minutes=1), verdict(new_pass, Verdict.PASS, minutes=10),
+          verdict(new_fail, Verdict.FAIL, minutes=6)]
+    row, = dashboard.findings_table([report("V", Severity.HIGH)], [old_fail, new_pass, new_fail], vs, {}, ENV)
+    assert row["correlation_id"] == "corr_r3"
+    assert row["trace_url"].endswith(dashboard.langfuse_trace_id("corr_r3"))
+    # no failing run -> latest run of the case
+    row, = dashboard.findings_table([report("V", Severity.HIGH)], [old_fail, new_pass], [], {}, ENV)
+    assert row["correlation_id"] == "corr_r2"
+
+
+def test_load_reviews_reads_sidecar_table_and_tolerates_absence():
+    store = SqliteStore(":memory:")
+    assert dashboard.load_reviews(store) == {}
+    store._conn.execute("CREATE TABLE report_reviews (vuln_id TEXT PRIMARY KEY, pending_human_review INTEGER)")
+    store._conn.execute("INSERT INTO report_reviews VALUES ('V1', 1), ('V2', 0)")
+    assert dashboard.load_reviews(store) == {"V1": True, "V2": False}
+    assert dashboard.load_reviews(FakeStore()) == {}
+
+
+# ---- versions --------------------------------------------------------------------------------------
+
+
+def test_version_breakdown_orders_versions_and_counts_regressions_and_fixes():
+    runs = [run("a1", "c1", "v1", minutes=0), run("a2", "c2", "v1", minutes=1), run("a3", "c3", "v1", minutes=2),
+            run("b1", "c1", "v2", minutes=10), run("b2", "c2", "v2", minutes=11), run("b3", "c3", "v2", minutes=12),
+            run("b4", "c4", "v2", minutes=13, cost=0.5)]
+    vs = [verdict(runs[0], Verdict.PASS), verdict(runs[1], Verdict.FAIL), verdict(runs[2], Verdict.PASS),
+          verdict(runs[3], Verdict.FAIL),   # c1 pass -> fail: regression
+          verdict(runs[4], Verdict.PASS),   # c2 fail -> pass: fix
+          verdict(runs[5], Verdict.ERROR)]  # c3 pass -> error: neither; c4 unjudged
+    # pass the newer version's runs first to prove ordering comes from started_at, not input order
+    v1, v2 = dashboard.version_breakdown(runs[3:] + runs[:3], vs)
+    assert (v1["target_version"], v2["target_version"]) == ("v1", "v2")
+    assert (v1["pass"], v1["fail"], v1["regressions"], v1["fixes"]) == (2, 1, None, None)
+    assert v1["fail_rate"] == pytest.approx(1 / 3)
+    assert (v2["runs"], v2["cases"], v2["pass"], v2["fail"], v2["error"], v2["unjudged"]) == (4, 4, 1, 1, 1, 1)
+    assert (v2["regressions"], v2["fixes"]) == (1, 1)
+    assert v2["cost_usd"] == 0.5
+
+
+# ---- whole page / empty store / read-only ------------------------------------------------------------
+
+
+def test_empty_store_builds_and_renders():
+    data = dashboard.build(FakeStore(), env={}, reviews={}, source="empty.db")
+    assert data["stats"]["runs"] == 0 and data["stats"]["latency_p50_ms"] is None
+    assert len(data["coverage"]) == len(AttackCategory) and all(r["gap"] for r in data["coverage"])
+    assert data["feed"] == data["findings"] == data["versions"] == []
+    page = dashboard.render_html(data)
+    assert "No verdicts yet" in page and "No vulnerability reports yet" in page and "No runs yet" in page
+    assert f"0 of {len(AttackCategory)} categories exercised" in page
+
+
+def test_page_is_self_contained_and_escapes_store_content():
+    c = case("c1")
+    r = run("r1", "c1", latency={"s": 10.0})
+    v = verdict(r, Verdict.FAIL, canary_hit=True, match="<script>alert(1)</script>")
+    rep = report("V1", Severity.CRITICAL).model_copy(update={"title": "<img src=x onerror=alert(1)>"})
+    cov = {AUTHZ.value: {"count": 1, "pass": 0, "fail": 1, "partial": 0, "cost_usd": 0.0}}
+    page = dashboard.render_html(dashboard.build(FakeStore([c], [r], [v], [rep], cov), env=ENV, reviews={}))
+    assert "<script>alert" not in page and "<img src=x" not in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert not re.search(r'<(?:script|link|img)[^>]+(?:src|href)=', page)  # no external assets
+    assert page.count("https://lf.example.com/project/proj123/traces/") == 2  # feed row + finding row
+
+
+def test_generate_opens_store_read_only(tmp_path):
+    db = tmp_path / "store.db"
+    with SqliteStore(str(db)) as store:
+        store.add_case(case("c1"))
+        store.add_run(run("r1", "c1"))
+    before = db.read_bytes()
+    page = dashboard.generate(str(db))
+    assert "1 of 12 categories exercised" in page
+    assert db.read_bytes() == before
+
+    ro = SqliteStore.open_readonly(str(db))
+    assert len(ro.list_runs()) == 1
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        ro.add_run(run("r2", "c1"))
+    ro.close()
+
+
+def test_generate_missing_db_renders_empty_without_creating_it(tmp_path):
+    db = tmp_path / "missing.db"
+    page = dashboard.generate(str(db))
+    assert "No database at" in page
+    assert not db.exists()
+
+
+def test_cli_writes_html_file(tmp_path, capsys):
+    out = tmp_path / "d.html"
+    assert dashboard.main(["--db", str(tmp_path / "none.db"), "--out", str(out)]) == 0
+    assert out.read_text().startswith("<!doctype html>")
+    assert str(out) in capsys.readouterr().out
