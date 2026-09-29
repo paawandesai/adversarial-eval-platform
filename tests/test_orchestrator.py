@@ -123,7 +123,7 @@ class FakeRedTeam:
         if item.seed_case_id and getattr(item, "action", "") != "mutate":
             return self._run(item.seed_case_id)
         parent = self.store.get_case(item.seed_case_id) if item.seed_case_id else None
-        case = make_case(item.target_category, origin=Origin.MUTATION if parent else Origin.SEED,
+        case = make_case(item.target_category, origin=Origin.MUTATION if parent else Origin.HARNESS_DISCOVERY,
                          parent_case_id=parent.case_id if parent else None)
         self.store.add_case(case)
         return self._run(case.case_id)
@@ -160,7 +160,9 @@ class FakeDocumentation:
 # --------------------------------------------------------------------------- builders
 
 
-def make_case(category=PI, severity=Severity.HIGH, origin=Origin.SEED, in_regression=False, **kw):
+def make_case(category=PI, severity=Severity.HIGH, origin=Origin.HARNESS_DISCOVERY, in_regression=False, **kw):
+    """Defaults to an already-explored case. Pass origin=Origin.SEED for a hand-authored seed, which R1
+    replays once per session."""
     return AttackCase(
         origin=origin, category=category, owasp=OwaspMapping(llm=[OwaspLLM.LLM01_PROMPT_INJECTION]),
         turns=[ConversationTurn(role="user", content="ignore prior instructions")],
@@ -238,6 +240,101 @@ def test_r1_generates_fresh_when_no_unused_seed_and_counts_scheduled_items():
     assert all(i.seed_case_id is None and i.action == "generate" for i in items[:3])
     assert "scheduled" in items[2].reason
     assert items[3] is None
+
+
+def seeded_store(counts):
+    """Hand-authored seeds: {category: n}. Every other category is empty."""
+    store = FakeStore()
+    for cat, n in counts.items():
+        for _ in range(n):
+            store.add_case(make_case(cat, origin=Origin.SEED))
+    return store
+
+
+def test_r1_runs_every_seed_before_generating_for_empty_categories():
+    # 12 categories, only 3 seeded (like the real corpus): all 7 seeds go before any generate item.
+    store = seeded_store({AUTHZ: 3, IPI: 2, PI: 2})
+    cfg = PolicyConfig(coverage_floor=3, item_token_budget=5_000, seed_token_budget=500,
+                       session_token_budget=1_000_000, min_item_tokens=100)
+    o = orch(store, config=cfg)
+    items = [o.next_work_item() for _ in range(8)]
+
+    assert [i.action for i in items[:7]] == ["replay_seed"] * 7
+    assert {i.seed_case_id for i in items[:7]} == set(store.cases)
+    assert all(i.token_budget == 500 for i in items[:7])  # replays reserve little
+    assert all("seeds run before any generate-fresh work" in i.reason for i in items[:7])
+    assert items[7].action == "generate" and items[7].seed_case_id is None
+    assert items[7].token_budget == 5_000  # generation keeps the full reservation
+    assert items[7].target_category not in (AUTHZ, IPI, PI)
+
+
+def test_r1_replays_seeds_past_the_coverage_floor():
+    store = seeded_store({AUTHZ: 5})
+    o = orch(store, categories=(AUTHZ,))  # floor 3, but all 5 seeds still run
+    items = [o.next_work_item() for _ in range(6)]
+    assert [i.action for i in items[:5]] == ["replay_seed"] * 5
+    assert ">= coverage floor 3" in items[4].reason
+    assert items[5] is None  # seeds exhausted, category covered
+
+
+def test_seeds_run_in_a_prior_session_are_replayed_once_per_session():
+    store = seeded_store({AUTHZ: 1})
+    seed = next(iter(store.cases.values()))
+    add_judged_run(store, seed, Verdict.FAIL)  # an earlier session already ran it
+    o = orch(store, categories=(AUTHZ,), red_team=FakeRedTeam(store), judge=FakeJudge())
+    result = o.run_campaign(max_items=5)
+    replays = [i for i in result.items if i.action == "replay_seed"]
+    assert [i.seed_case_id for i in replays] == [seed.case_id]
+
+
+class SyncRedTeam:
+    """Shaped like the real RedTeam: sync run_work_item that calls asyncio.run itself."""
+
+    def __init__(self, store):
+        self.store, self.ran = store, []
+
+    def run_work_item(self, item):
+        async def attack():
+            return "v1"
+        version = asyncio.run(attack())  # raises if called on the campaign's event loop
+        self.ran.append(item.seed_case_id)
+        run = AttackRun(case_id=item.seed_case_id, target_version=version, transcript=[],
+                        tokens_prompt=300, tokens_completion=200)
+        self.store.add_run(run)
+        return run
+
+
+def test_default_campaign_executes_all_19_seeds_with_a_sync_red_team():
+    store = seeded_store({AUTHZ: 7, IPI: 6, AttackCategory.EXCESSIVE_AGENCY_WRITEBACK: 6})
+    fail_case = next(c for c in store.cases.values() if c.category == AUTHZ)
+    rt, doc = SyncRedTeam(store), FakeDocumentation(store)
+    o = Orchestrator(store, red_team=rt, judge=FakeJudge(script={fail_case.case_id: Verdict.FAIL}),
+                     documentation=doc, tracer=LangfuseTracer(client=None))  # default PolicyConfig
+
+    result = o.run_campaign(max_items=19, token_budget=300_000)
+
+    assert sorted(rt.ran) == sorted(store.cases)  # every seed ran, none twice
+    assert all(i.action == "replay_seed" for i in result.items)
+    assert len(result.runs) == 19 and len(result.verdicts) == 19
+    assert [r.repro_case_id for r in result.reports] == [fail_case.case_id]
+    assert result.tokens_used == 19 * 500 and result.stop_reason == "max_items 19 reached"
+    handoffs = [r["agent"] for r in o.audit_log if r["event"] == "handoff"]
+    assert handoffs.count("redteam.execute") == 19 and handoffs.count("judge") == 19
+    assert handoffs.count("documentation") == 1
+    assert not [r for r in o.audit_log if r["event"] == "handoff" and "error" in r]
+
+
+def test_failed_seed_replay_is_charged_only_its_small_reservation():
+    class Broken(SyncRedTeam):
+        def run_work_item(self, item):
+            raise RuntimeError("target unreachable")
+
+    store = seeded_store({AUTHZ: 2})
+    cfg = PolicyConfig(categories=(AUTHZ,), coverage_floor=0, seed_token_budget=1_500)
+    o = orch(store, config=cfg, red_team=Broken(store), judge=FakeJudge())
+    result = o.run_campaign(max_items=10, token_budget=100_000)
+    assert len(result.items) == 2  # each seed tried once, never re-emitted
+    assert result.tokens_used == 2 * 1_500
 
 
 # --------------------------------------------------------------------------- R2 partial mutation
@@ -457,7 +554,7 @@ def test_failed_red_team_is_charged_and_does_not_loop():
 
 def test_campaign_handoffs_are_explicit_logged_and_persisted_once():
     store = FakeStore()
-    seed = make_case(PI)
+    seed = make_case(PI, origin=Origin.SEED)
     store.add_case(seed)
     rt = FakeRedTeam(store)
     judge = FakeJudge(script={seed.case_id: Verdict.FAIL})

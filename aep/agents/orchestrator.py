@@ -8,7 +8,8 @@ Policy (see ``Orchestrator.next_work_item``)
 -------------------------------------------
     R5 token_budget         session token budget exhausted -> emit nothing (campaign halts)
     R3 new_target_version   target /version differs from the last one seen -> regression trigger
-    R1 coverage_floor       a category has fewer than ``coverage_floor`` runs -> explore it
+    R1 coverage_floor       replay every seed not yet run this session, then fill categories that are
+                            still under ``coverage_floor`` runs with generate-fresh work
     R2 partial_mutation     a PARTIAL verdict nobody has mutated yet -> mutate from that case
     R4 reverify_open_finding  a high-severity OPEN finding not re-tested on this version -> replay it
     R5 cost_guard           a category's cost per new finding is over the threshold -> R1/R2 skip it
@@ -17,15 +18,25 @@ Rules are numbered as in the design spec. They are *evaluated* in the order abov
 because on a new target version the regression suite must be replayed before any new exploration.
 R4 is exempt from the cost guard, since re-verifying a known high-severity finding is bounded work.
 
+R1 schedules seeds before any generate-fresh work, across all categories. Seeds are cheap and
+deterministic, and they are what the campaign is judged against. Generating fresh cases costs LLM
+calls and only makes sense once the seeds are exhausted. Hand-authored seeds (``Origin.SEED``) are
+replayed once per session, because they are the baseline every campaign re-checks. Other unmutated
+cases are replayed only if the Store has never run them. Seed replays reserve ``seed_token_budget``,
+not ``item_token_budget``, so planned LLM work can't lock up the session budget before a seed runs.
+
 Agents are injected, not imported, so this module has no dependency on the Red Team / Judge /
 Documentation packages and can be tested with fakes. Each dependency may be an object with one of the
 method names below, or a plain callable. Sync and async implementations are both accepted.
 
-    red_team.execute(item: WorkItem)                 -> AttackRun | list[AttackRun]
+    red_team.execute(item: WorkItem)                 -> AttackRun | list[AttackRun]  (or run_work_item)
     red_team.replay(case: AttackCase[, target_version=...]) -> AttackRun | list[AttackRun]
     judge.judge(run: AttackRun)                      -> JudgeVerdict | list[JudgeVerdict]
     documentation.document(verdict[, run=..., case=...]) -> VulnerabilityReport | None
     version_provider()                               -> str | None   (e.g. TargetClient.target_version)
+
+Sync agents are called on a worker thread. That keeps them off the campaign's event loop, so an
+agent that calls ``asyncio.run`` itself (as ``RedTeam.run_work_item`` does) still works.
 
 Runs, verdicts and reports returned by the agents are written to the Store if the agent did not
 already write them, so either persistence convention works without duplicates.
@@ -76,7 +87,8 @@ def _rule(rule_id: str) -> str:
 @dataclass(frozen=True)
 class PolicyConfig:
     coverage_floor: int = 3                 # runs per category before it counts as covered
-    item_token_budget: int = 20_000         # per-WorkItem hard cap handed to the Red Team
+    item_token_budget: int = 20_000         # per-WorkItem hard cap handed to the Red Team (LLM work)
+    seed_token_budget: int = 2_000          # reservation for replay_seed/reverify: no generation spend
     session_token_budget: int = 200_000     # per-session cap; emission stops when it is spent
     min_item_tokens: int = 1_000            # don't emit an item with less budget than this
     max_cost_per_finding_usd: float = 2.0   # R5 threshold
@@ -152,7 +164,7 @@ class Orchestrator:
         self.config = config or PolicyConfig()
         self.session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._tracer = tracer
-        self._execute = _bind(red_team, ("execute", "run"), "red_team")
+        self._execute = _bind(red_team, ("execute", "run", "run_work_item"), "red_team")
         self._replay = _bind(red_team, ("replay", "run_case", "execute_case"), "red_team", allow_call=False)
         self._judge = _bind(judge, ("judge", "evaluate"), "judge")
         self._document = _bind(documentation, ("document", "write_report", "report"), "documentation")
@@ -362,37 +374,69 @@ class Orchestrator:
                               version: Optional[str], trail: list[str]) -> Optional[PlannedWork]:
         r = _rule("R1")
         floor = self.config.coverage_floor
-        gaps = []
+        tallies = []
         for order, cat in enumerate(self._categories()):
             runs = (coverage.get(cat) or {}).get("count", 0)
             pending = max(self._coverage_pending[cat], 0)
-            if runs + pending < floor:
-                gaps.append((runs + pending, order, cat, runs, pending))
+            tallies.append((runs + pending, order, cat, runs, pending))
+        tallies.sort()
+
+        def status(cat: str, runs: int, pending: int) -> str:
+            scheduled = f" + {pending} scheduled" if pending else ""
+            below = "<" if runs + pending < floor else ">="
+            return f"{r}: {cat} has {runs} run(s){scheduled} {below} coverage floor {floor}; "
+
+        def emit(cat: str, action: str, seed: Optional[AttackCase], token_budget: int,
+                 reason: str) -> PlannedWork:
+            self._coverage_pending[cat] += 1
+            return PlannedWork(rule="R1", action=action, target_category=AttackCategory(cat),
+                               seed_case_id=seed.case_id if seed else None, token_budget=token_budget,
+                               target_version=version, reason=reason)
+
+        def replay(cat: str, runs: int, pending: int, seed: AttackCase, why: str) -> PlannedWork:
+            self._used_seeds.add(seed.case_id)
+            seed_budget = min(self.config.seed_token_budget, self.budget_remaining)
+            return emit(cat, "replay_seed", seed, seed_budget,
+                        status(cat, runs, pending) + f"running unused seed {seed.case_id!r}{why}")
+
+        # Pass 1: a hand-authored seed not yet run this session, in any category, beats generating
+        # fresh. Least-covered category first.
+        for _, _, cat, runs, pending in tallies:
+            if cat in guarded:
+                continue
+            seed = self._unused_seed(cat, hand_authored=True)
+            if seed is not None:
+                return replay(cat, runs, pending, seed, " (seeds run before any generate-fresh work)")
+
+        # Pass 2: every seed has run; fill categories still under the floor, with a never-run case
+        # if the Store has one, else generated work.
+        gaps = [t for t in tallies if t[0] < floor]
         if not gaps:
-            trail.append(f"{r}: every category has >= {floor} runs")
+            trail.append(f"{r}: every seed ran this session and every category has >= {floor} runs")
             return None
-        for _, _, cat, runs, pending in sorted(gaps):
+        for _, _, cat, runs, pending in gaps:
             if cat in guarded:
                 trail.append(f"{r}: {cat} below floor but cost-guarded (R5); skipped")
                 continue
-            seed = self._unused_seed(cat)
-            gap = f"{r}: {cat} has {runs} run(s)" + (f" + {pending} scheduled" if pending else "") + \
-                  f" < coverage floor {floor}; "
+            seed = self._unused_seed(cat, hand_authored=False)
             if seed is not None:
-                self._used_seeds.add(seed.case_id)
-                reason, action = gap + f"running unused seed {seed.case_id!r}", "replay_seed"
-            else:
-                reason, action = gap + "no unused seed in category, Red Team to generate fresh", "generate"
-            self._coverage_pending[cat] += 1
-            return PlannedWork(rule="R1", action=action, target_category=AttackCategory(cat),
-                               seed_case_id=seed.case_id if seed else None, token_budget=budget,
-                               target_version=version, reason=reason)
+                return replay(cat, runs, pending, seed, "")
+            return emit(cat, "generate", None, budget, status(cat, runs, pending) +
+                        "no unused seed in any category, Red Team to generate fresh")
         return None
 
-    def _unused_seed(self, category: str) -> Optional[AttackCase]:
+    def _unused_seed(self, category: str, *, hand_authored: bool) -> Optional[AttackCase]:
+        """Highest-severity replayable case in ``category``.
+
+        hand_authored=True: ``Origin.SEED`` cases not yet run this session. False: any unmutated case
+        the Store has never run.
+        """
+        if hand_authored:
+            keep = lambda c: c.origin == Origin.SEED  # noqa: E731
+        else:
+            keep = lambda c: c.origin != Origin.MUTATION and not self.store.list_runs(case_id=c.case_id)  # noqa: E731
         seeds = [c for c in self.store.list_cases(category=category)
-                 if c.origin != Origin.MUTATION and c.case_id not in self._used_seeds
-                 and not self.store.list_runs(case_id=c.case_id)]
+                 if c.case_id not in self._used_seeds and keep(c)]
         seeds.sort(key=lambda c: -SEVERITY_RANK[c.severity_if_success])  # stable: store order breaks ties
         return seeds[0] if seeds else None
 
@@ -450,7 +494,8 @@ class Orchestrator:
             self._reverified.add((rep.vuln_id, version))
             return PlannedWork(
                 rule="R4", action="reverify", target_category=rep.category, seed_case_id=rep.repro_case_id,
-                token_budget=budget, target_version=version, vuln_id=rep.vuln_id,
+                token_budget=min(budget, self.config.seed_token_budget), target_version=version,
+                vuln_id=rep.vuln_id,
                 reason=(f"{r}: {rep.severity.value} finding {rep.vuln_id!r} is {rep.status.value} and its repro "
                         f"case {rep.repro_case_id!r} has not been re-tested on version {version!r} "
                         f"(last seen {rep.last_seen_version or 'unknown'!r})"),
@@ -531,6 +576,7 @@ class Orchestrator:
         return None
 
     async def _replay_case(self, case: AttackCase, target_version: str, cid: str) -> list[AttackRun]:
+        self._used_seeds.add(case.case_id)  # replayed this session; R1 needn't run it again
         if self._replay is not None:
             fn, agent = self._replay, "redteam.replay"
             call = lambda: _call_flex(fn, case, target_version=target_version)  # noqa: E731
@@ -640,7 +686,9 @@ class Orchestrator:
                   "session_id": self.session_id, **meta}
         with self._trace(correlation_id, f"orchestrator.handoff.{agent}", **meta) as span:
             try:
-                out = await _maybe_await(call())
+                # Sync agents run off the event loop (they may call asyncio.run themselves).
+                # An async agent's call() just builds a coroutine, which is awaited here.
+                out = await _maybe_await(await asyncio.to_thread(call))
             except Exception as exc:
                 record["error"] = f"{type(exc).__name__}: {exc}"
                 self._audit(record)
