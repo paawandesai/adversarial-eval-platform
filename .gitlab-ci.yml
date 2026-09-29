@@ -8,6 +8,7 @@
 stages:
 - test
 - secret-detection
+- regression
 sast:
   stage: test
 include:
@@ -17,3 +18,48 @@ variables:
   SECRET_DETECTION_ENABLED: 'true'
 secret_detection:
   stage: secret-detection
+
+# ---- Regression gate (scripts/regression_gate.py) --------------------------------------------
+# Exit 0 PASS, 1 FAIL (reappeared exploit / claimed fix still FAIL / positive-control breakage),
+# 2 INCONCLUSIVE (target unreachable, gated case errored, empty suite).
+
+# Offline self-test, no secrets: a simulated reappeared exploit must turn the gate red and a
+# validated fix must leave it green.
+regression_gate_selftest:
+  stage: regression
+  image: python:3.9-slim
+  before_script:
+  - pip install --quiet pydantic httpx
+  script:
+  - python3 scripts/regression_gate.py --demo clean
+  - if python3 scripts/regression_gate.py --demo reappeared; then echo "gate missed a reappeared exploit"; exit 1; fi
+
+# Live gate: replays the confirmed exploits + positive controls against the deployed target.
+# Needs the .env.example variables as masked CI/CD variables (TARGET_*, JUDGE_MODEL, API keys).
+# The store is carried between pipelines in the cache, because the gate compares against verdicts
+# recorded at earlier target versions. Name claimed fixes with AEP_CLAIMED_FIXES (comma-separated
+# case or vuln ids), or mark the report RESOLVED in the store.
+regression_gate:
+  stage: regression
+  image: python:3.9-slim
+  rules:
+  - if: $TARGET_OAUTH_CLIENT_ID
+  resource_group: live-target
+  cache:
+    key: aep-regression-store
+    paths:
+    - seeds.db
+    policy: pull-push
+  before_script:
+  - pip install --quiet pydantic httpx
+  - test -f seeds.db || python3 scripts/load_seeds.py --insert --db seeds.db
+  script:
+  - python3 scripts/regression_gate.py --db seeds.db --report regression_gate.json
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+    - regression_gate.json
+  allow_failure:
+    exit_codes:
+    - 2

@@ -68,6 +68,18 @@ python3 scripts/dashboard.py --serve --port 8765     # then open http://localhos
 python3 scripts/dashboard.py --db seeds.db --out /tmp/aep.html   # or render a static file
 ```
 
+**5. Regression gate** — replays the confirmed exploits (regression-suite cases with a FAIL on
+record) and the positive controls through `Orchestrator.run_regression`, then compares against the
+verdicts recorded at the previous target version. It exits 1 if an exploit reappeared, if a claimed
+fix is still FAIL, or if a positive control broke. It exits 2 if the result is inconclusive. CI runs
+it as the `regression_gate` job in `.gitlab-ci.yml`.
+
+```bash
+python3 scripts/regression_gate.py --db seeds.db                    # live target
+python3 scripts/regression_gate.py --db seeds.db --claimed-fix seed-authz-07-brief-cross-patient
+python3 scripts/regression_gate.py --demo reappeared                # offline simulation, exits 1
+```
+
 ## Tests
 
 ```bash
