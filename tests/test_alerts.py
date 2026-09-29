@@ -6,6 +6,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,11 +25,15 @@ NOW = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
 
 
 class FakeStore:
-    """The two read methods alerts may call. Anything else, a write included, raises AttributeError."""
+    """The three read methods alerts may call. Anything else, a write included, raises AttributeError."""
 
-    def __init__(self, runs=(), verdicts=()):
-        self._runs, self._verdicts = list(runs), list(verdicts)
+    def __init__(self, runs=(), verdicts=(), cases=()):
+        self._runs, self._verdicts, self._cases = list(runs), list(verdicts), list(cases)
         self.calls = []
+
+    def list_cases(self):
+        self.calls.append("list_cases")
+        return list(self._cases)
 
     def list_runs(self):
         self.calls.append("list_runs")
@@ -63,8 +68,8 @@ def by_key(results):
     return {r.key: r for r in results}
 
 
-def evaluate(runs=(), verdicts=(), **overrides):
-    return by_key(alerts.evaluate(FakeStore(runs, verdicts), settings(**overrides), now=NOW))
+def evaluate(runs=(), verdicts=(), cases=(), **overrides):
+    return by_key(alerts.evaluate(FakeStore(runs, verdicts, cases), settings(**overrides), now=NOW))
 
 
 # --------------------------------------------------------------------------- #
@@ -113,10 +118,10 @@ def test_bad_override_raises():
 # --------------------------------------------------------------------------- #
 # Read-only
 # --------------------------------------------------------------------------- #
-def test_evaluate_only_calls_the_two_read_methods():
+def test_evaluate_only_calls_read_methods():
     store = FakeStore([run(1, 100)], [])
     alerts.evaluate(store, settings(), now=NOW)
-    assert sorted(set(store.calls)) == ["list_runs", "list_verdicts"]
+    assert sorted(set(store.calls)) == ["list_cases", "list_runs", "list_verdicts"]
 
 
 # --------------------------------------------------------------------------- #
@@ -166,6 +171,19 @@ def test_error_rate_leaves_unjudged_runs_out():
     a = evaluate(runs, verdicts)["error_rate"]
     assert a.state == alerts.OK and a.value == 0.0 and a.samples == 6
     assert a.detail == "0 of 6 judged runs errored; 2 not judged yet"
+
+
+def test_error_rate_excludes_expected_inconclusive_cases():
+    # 5 runs of a documented-limitation case error out; they are skips, not platform errors.
+    runs = [run(i) for i in range(10)]
+    verdicts = [verdict(r, Verdict.ERROR if i < 5 else Verdict.PASS) for i, r in enumerate(runs)]
+    cases = [SimpleNamespace(case_id=f"case_{i}", oracle_config={"known_limitation": {
+        "expected": "inconclusive", "reason": "write-back ACL-blocked"}}) for i in range(5)]
+    a = evaluate(runs, verdicts, cases)["error_rate"]
+    assert a.state == alerts.OK and a.value == 0.0 and a.samples == 5 and a.examples == []
+    assert a.detail == "0 of 5 judged runs errored; 5 expected skips (documented limitation) excluded"
+    # Without the tag the same store fires.
+    assert evaluate(runs, verdicts)["error_rate"].state == alerts.FIRING
 
 
 def test_error_rate_at_threshold_is_not_firing():

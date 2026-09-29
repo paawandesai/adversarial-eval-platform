@@ -444,3 +444,155 @@ def test_errors_on_expected_inconclusive_cases_show_as_skipped_not_error():
     assert (data["versions"][0]["error"], data["versions"][0]["skipped"]) == (1, 1)
     html_out = dashboard.render_html(data)
     assert "skipped — expected (documented limitation)" in html_out and 'data-verdict="skipped"' in html_out
+
+
+def _tagged(case_id, category=AttackCategory.EXCESSIVE_AGENCY_WRITEBACK, reason="write-back ACL-blocked"):
+    return case(case_id, category=category).model_copy(update={"oracle_config": {"known_limitation": {
+        "expected": "inconclusive", "reason": reason, "ref": "THREAT_MODEL.md section 7"}}})
+
+
+def test_expected_inconclusive_cases_without_runs_count_as_skipped():
+    EA = AttackCategory.EXCESSIVE_AGENCY_WRITEBACK.value
+    store = SqliteStore(":memory:")
+    for c in (case("c1"), case("c2"), _tagged("ea1"), _tagged("ea2"), _tagged("ea3"), _tagged("ea4")):
+        store.add_case(c)
+    r1, r2, r4 = run("r1", "c1"), run("r2", "c2"), run("r4", "ea4")
+    for r in (r1, r2, r4):
+        store.add_run(r)
+    store.add_verdict(verdict(r1, Verdict.PASS))
+    store.add_verdict(verdict(r2, Verdict.FAIL))
+    store.add_verdict(verdict(r4, Verdict.ERROR, reason="ACL"))  # a tagged case that did run: skipped once, not twice
+
+    data = dashboard.build(store, env={}, reviews={})
+    s = data["stats"]
+    assert (s["pass"], s["fail"], s["error"], s["skipped"]) == (1, 1, 0, 4)
+    assert (s["verdicts"], s["skipped_not_run"], s["outcomes"]) == (3, 3, 6)  # every case in the store accounted for
+
+    by_cat = {r["category"]: r for r in data["coverage"]}
+    ea = by_cat[EA]
+    assert (ea["cases"], ea["runs"], ea["skipped"], ea["skipped_not_run"], ea["unjudged"], ea["error"]) == (4, 1, 4, 3, 0, 0)
+    assert ea["gap"] is False
+    authz = by_cat[AUTHZ.value]
+    assert (authz["skipped"], authz["unjudged"]) == (0, 0)
+    assert [x["case_id"] for x in data["expected_skips"]] == ["ea1", "ea2", "ea3"]
+    assert data["expected_skips"][0] == {"case_id": "ea1", "category": EA,
+                                         "reason": "write-back ACL-blocked (THREAT_MODEL.md section 7)"}
+
+    page = dashboard.render_html(data)
+    assert "3 verdicts + 3 documented skips not run" in page
+    assert "skipped 4" in page
+    assert "3 cases skipped — expected (documented limitation), not run" in page
+    assert "<span class=\"mono\">ea1</span> — write-back ACL-blocked (THREAT_MODEL.md section 7)" in page
+
+
+def test_category_with_only_unrun_expected_skips_is_labelled_not_a_gap():
+    rows = dashboard.coverage_matrix({}, [_tagged("ea1"), _tagged("ea2")], [], [])
+    ea = next(r for r in rows if r["category"] == AttackCategory.EXCESSIVE_AGENCY_WRITEBACK.value)
+    assert (ea["runs"], ea["skipped"], ea["gap"]) == (0, 2, False)
+    html_out = dashboard._coverage(rows)
+    assert "documented limitation" in html_out
+
+
+def test_tagged_case_that_passes_counts_as_pass_not_skipped():
+    store = SqliteStore(":memory:")
+    store.add_case(_tagged("ea1"))
+    r = run("r1", "ea1")
+    store.add_run(r)
+    store.add_verdict(verdict(r, Verdict.PASS))
+    s = dashboard.build(store, env={}, reviews={})["stats"]
+    assert (s["pass"], s["skipped"], s["skipped_not_run"]) == (1, 0, 0)
+
+
+# ---- alerts ----------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def alert_env(monkeypatch):
+    for key in ("ALERT_P95_LATENCY_MS", "ALERT_ERROR_RATE", "ALERT_TARGET_FAILURE_RATE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ALERT_WINDOW_HOURS", "0")  # the fixture runs are dated 2026-09-01
+    monkeypatch.setenv("ALERT_MIN_SAMPLES", "1")
+    return monkeypatch
+
+
+def _alert_store(path):
+    with SqliteStore(str(path)) as store:
+        store.add_case(case("c1"))
+        store.add_case(case("c2"))
+        r1, r2 = run("r1", "c1", latency={"redteam.attack": 900.0}), run("r2", "c2", latency={"redteam.attack": 1100.0})
+        store.add_run(r1)
+        store.add_run(r2)
+        store.add_verdict(verdict(r1, Verdict.PASS))
+        store.add_verdict(verdict(r2, Verdict.ERROR, reason="judge model call failed"))
+
+
+def test_alerts_section_renders_state_value_and_threshold(tmp_path, alert_env):
+    db = tmp_path / "store.db"
+    _alert_store(db)
+    with SqliteStore.open_readonly(str(db)) as store:
+        data = dashboard.build(store, reviews={})
+    states = {r["key"]: r["state"] for r in data["alerts"]["results"]}
+    assert states == {"p95_latency": "ok", "error_rate": "firing", "target_failure_rate": "ok"}  # 1 of 2 errored
+    page = dashboard.render_html(data)
+    assert "<h2>Alerts · 1 firing</h2>" in page
+    assert 'data-alert="error_rate" data-state="firing"' in page
+    row = re.search(r'<tr data-alert="error_rate".*?</tr>', page).group(0)
+    assert ">50.0%<" in row and ">10.0%<" in row and "docs/ALERTS.md#error_rate" in row
+    assert page.index("<h2>Alerts") < page.index("<h2>Coverage by attack category")
+
+
+def test_alerts_in_data_json_and_watch_signature_matches_page(tmp_path, alert_env):
+    db = tmp_path / "store.db"
+    _alert_store(db)
+    agg = dashboard.aggregates(str(db))
+    json.dumps(agg)
+    assert [r["key"] for r in agg["alerts"]["results"]] == ["p95_latency", "error_rate", "target_failure_rate"]
+    assert {r["key"]: r["state"] for r in agg["alerts"]["results"]}["error_rate"] == "firing"
+    # The page's embedded signature must equal /data's, or --watch reloads forever.
+    page = dashboard.generate(str(db), watch=True)
+    assert json.dumps(agg["signature"]) in page
+
+    # An alert changing state (threshold raised) moves the signature, so --watch refreshes it.
+    alert_env.setenv("ALERT_ERROR_RATE", "0.9")
+    agg2 = dashboard.aggregates(str(db))
+    assert agg2["stats"] == agg["stats"] and agg2["signature"] != agg["signature"]
+
+
+def test_alerts_bad_threshold_is_shown_not_raised(alert_env):
+    alert_env.setenv("ALERT_ERROR_RATE", "lots")
+    data = dashboard.build(FakeStore(), reviews={})
+    assert "ALERT_ERROR_RATE" in data["alerts"]["error"]
+    assert "Alerts not evaluated: ALERT_ERROR_RATE=&#x27;lots&#x27; is not a number" in dashboard.render_html(data)
+
+
+# ---- Langfuse trace links --------------------------------------------------------------------------
+
+
+def _linked_store():
+    c = case("c1")
+    r = run("r1", "c1")
+    return FakeStore([c], [r], [verdict(r, Verdict.FAIL)], [report("V1", Severity.HIGH)])
+
+
+def test_trace_links_render_when_env_set():
+    page = dashboard.render_html(dashboard.build(_linked_store(), env=ENV, reviews={}))
+    tid = dashboard.langfuse_trace_id("corr_r1")
+    link = f'<a class="mono" href="https://lf.example.com/project/proj123/traces/{tid}" target="_blank" rel="noopener"'
+    assert page.count(link) == 2  # feed row + finding row
+    assert "links off" not in page
+
+    path_env = {"LANGFUSE_HOST": "https://lf.example.com", "LANGFUSE_PROJECT_PATH": "/org/o1/project/p9"}
+    page = dashboard.render_html(dashboard.build(_linked_store(), env=path_env, reviews={}))
+    assert f'href="https://lf.example.com/org/o1/project/p9/traces/{tid}"' in page
+
+
+@pytest.mark.parametrize("env, missing", [
+    ({}, "LANGFUSE_HOST and LANGFUSE_PROJECT_ID (or LANGFUSE_PROJECT_PATH)"),
+    ({"LANGFUSE_HOST": "https://lf.example.com"}, "LANGFUSE_PROJECT_ID (or LANGFUSE_PROJECT_PATH)"),
+    ({"LANGFUSE_PROJECT_ID": "proj123"}, "LANGFUSE_HOST"),
+])
+def test_trace_links_fall_back_and_name_the_missing_env(env, missing):
+    page = dashboard.render_html(dashboard.build(_linked_store(), env=env, reviews={}))
+    assert "/traces/" not in page
+    assert f"Langfuse links off: set {missing}" in page
+    assert '<span class="mono zero" title="corr_r1 (set LANGFUSE_HOST and LANGFUSE_PROJECT_ID to link)">' in page

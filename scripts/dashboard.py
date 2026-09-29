@@ -15,8 +15,15 @@ Langfuse links (env)
     LANGFUSE_HOST           e.g. https://langfuse.example.com
     LANGFUSE_PROJECT_PATH   path between host and /traces, e.g. /project/cm1abc2def   (wins if set)
     LANGFUSE_PROJECT_ID     shorthand for LANGFUSE_PROJECT_PATH=/project/<id>
-Without a host and a project, rows show the correlation_id without a link. The trace id is derived from the
+Without a host and a project, rows show the correlation_id without a link, and the header names the
+missing variable. The project id is the ``<id>`` in the Langfuse UI's ``/project/<id>/...`` URLs. The trace id is derived from the
 correlation_id exactly as aep.obs.tracing does it (Langfuse ``create_trace_id(seed=correlation_id)``).
+
+Alerts: the same three alerts as ``scripts/alerts.py`` (aep/alerts.py, thresholds from ALERT_* env) are shown
+near the top and included in the ``/data`` JSON.
+
+Expected skips: a case tagged ``oracle_config.known_limitation`` (aep/limitations.py) counts as "skipped", both
+when its run ERRORs and when it has no run at all, so the header covers every case in the store.
 
 Aggregation functions take plain model lists (or a Store-shaped object) so they are testable with a fake.
 """
@@ -37,7 +44,7 @@ from typing import Any, Iterable, Mapping, Optional
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from aep.agents.documentation import REVIEW_SEVERITIES  # noqa: E402
-from aep import health  # noqa: E402
+from aep import alerts, health  # noqa: E402
 from aep.agents.judge import needs_human_review  # noqa: E402
 from aep.limitations import expected_map  # noqa: E402
 from aep.store.sqlite_store import _WORST_RANK, SqliteStore  # noqa: E402
@@ -71,6 +78,14 @@ def langfuse_trace_id(correlation_id: str) -> str:
     return hashlib.sha256(correlation_id.encode("utf-8")).digest()[:16].hex()
 
 
+def langfuse_missing(env: Mapping[str, str]) -> list[str]:
+    """The env a trace link still needs; empty when links are on."""
+    missing = [] if (env.get("LANGFUSE_HOST") or "").strip() else ["LANGFUSE_HOST"]
+    if not (env.get("LANGFUSE_PROJECT_PATH") or env.get("LANGFUSE_PROJECT_ID")):
+        missing.append("LANGFUSE_PROJECT_ID (or LANGFUSE_PROJECT_PATH)")
+    return missing
+
+
 def langfuse_trace_url(correlation_id: Optional[str], env: Mapping[str, str]) -> Optional[str]:
     host = (env.get("LANGFUSE_HOST") or "").rstrip("/")
     path = env.get("LANGFUSE_PROJECT_PATH") or (
@@ -95,6 +110,13 @@ def outcome(verdict: str, case_id: str, expected: Mapping[str, str]) -> str:
     return "skipped" if verdict == Verdict.ERROR.value and case_id in expected else verdict
 
 
+def expected_not_run(cases: Iterable[AttackCase], runs: Iterable[AttackRun],
+                     expected: Mapping[str, str]) -> dict[str, str]:
+    """case_id -> documented reason, for expected-inconclusive cases with no run in the store (skipped outright)."""
+    ran = {r.case_id for r in runs}
+    return {c.case_id: expected[c.case_id] for c in cases if c.case_id in expected and c.case_id not in ran}
+
+
 def _short(text: str, limit: int = 140) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -108,16 +130,21 @@ def _plural(n: int, word: str) -> str:
 # Aggregations
 # --------------------------------------------------------------------------- #
 def header_stats(runs: list[AttackRun], verdicts: list[JudgeVerdict],
-                 reports: list[VulnerabilityReport], expected: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
-    """Verdict counts are per verdict row. Latency is end-to-end per run (sum of its steps); runs with no
-    recorded steps are left out of the percentiles rather than counted as 0 ms."""
-    expected = expected or {}
+                 reports: list[VulnerabilityReport], expected: Optional[Mapping[str, str]] = None,
+                 not_run: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
+    """Outcome counts are per verdict row, plus one "skipped" per expected-inconclusive case that has no run
+    (``not_run``), so ``outcomes`` = verdicts + those cases. Latency is end-to-end per run (sum of its steps);
+    runs with no recorded steps are left out of the percentiles rather than counted as 0 ms."""
+    expected, not_run = expected or {}, not_run or {}
     counts = Counter(outcome(v.verdict.value, v.case_id, expected) for v in verdicts)
+    counts["skipped"] += len(not_run)
     totals = [sum(r.latency_ms_by_step.values()) for r in runs if r.latency_ms_by_step]
     return {
         "runs": len(runs),
         "verdicts": len(verdicts),
+        "outcomes": len(verdicts) + len(not_run),
         **{k: counts.get(k, 0) for k in OUTCOMES},
+        "skipped_not_run": len(not_run),
         "findings": len(reports),
         "cost_usd": sum(r.cost_usd for r in runs),
         "latency_p50_ms": percentile(totals, 50),
@@ -132,7 +159,8 @@ def coverage_matrix(coverage: Mapping[str, Mapping[str, Any]], cases: list[Attac
 
     runs/pass/fail/partial/cost_usd come from store.coverage(). It has no error bucket, so ``error`` (runs whose
     only verdicts are ERROR), ``skipped`` (those runs on expected-inconclusive cases) and ``unjudged`` (the
-    rest) are derived here with the same worst-verdict rule.
+    rest) are derived here with the same worst-verdict rule. ``skipped`` also counts expected-inconclusive cases
+    with no run (``skipped_not_run``); a category whose only cases are those is not a ``gap``.
     """
     case_by_id = {c.case_id: c for c in cases}
     expected = expected_map(cases)
@@ -143,6 +171,8 @@ def coverage_matrix(coverage: Mapping[str, Mapping[str, Any]], cases: list[Attac
         case = case_by_id.get(r.case_id)
         if case is not None and worst.get(r.run_id) == Verdict.ERROR:
             (skipped if case.case_id in expected else errors)[case.category.value] += 1
+    not_run = expected_not_run(cases, runs, expected)
+    skipped_not_run = Counter(case_by_id[cid].category.value for cid in not_run)
     n_cases = Counter(c.category.value for c in cases)
     n_regression = Counter(c.category.value for c in cases if c.in_regression_suite)
 
@@ -161,11 +191,12 @@ def coverage_matrix(coverage: Mapping[str, Mapping[str, Any]], cases: list[Attac
             "fail": int(cov.get("fail", 0)),
             "partial": int(cov.get("partial", 0)),
             "error": errors.get(cat, 0),
-            "skipped": skipped.get(cat, 0),
+            "skipped": skipped.get(cat, 0) + skipped_not_run.get(cat, 0),
+            "skipped_not_run": skipped_not_run.get(cat, 0),
             "cost_usd": float(cov.get("cost_usd", 0.0)),
         }
-        row["unjudged"] = max(count - row["pass"] - row["fail"] - row["partial"] - row["error"] - row["skipped"], 0)
-        row["gap"] = count == 0
+        row["unjudged"] = max(count - row["pass"] - row["fail"] - row["partial"] - row["error"] - skipped.get(cat, 0), 0)
+        row["gap"] = count == 0 and not row["skipped_not_run"]
         rows.append(row)
     return rows
 
@@ -352,18 +383,35 @@ def build(store: Any, env: Optional[Mapping[str, str]] = None, reviews: Optional
     verdicts, reports = store.list_verdicts(), store.list_reports()
     reviews = load_reviews(store) if reviews is None else reviews
     expected = expected_map(cases)
+    not_run = expected_not_run(cases, runs, expected)
+    case_by_id = {c.case_id: c for c in cases}
     return {
         "generated_at": datetime.now(timezone.utc),
         "source": source,
         "notice": notice,
         "langfuse_linked": langfuse_trace_url("x", env) is not None,
-        "stats": header_stats(runs, verdicts, reports, expected),
+        "langfuse_missing": langfuse_missing(env),
+        "stats": header_stats(runs, verdicts, reports, expected, not_run),
+        "alerts": alert_block(store, env),
         "coverage": coverage_matrix(store.coverage(), cases, runs, verdicts),
+        "expected_skips": [{"case_id": cid, "category": case_by_id[cid].category.value, "reason": reason}
+                           for cid, reason in sorted(not_run.items())],
         "feed": verdict_feed(verdicts, env, expected=expected),
         "feed_total": len(verdicts),
         "findings": findings_table(reports, runs, verdicts, reviews, env),
         "versions": version_breakdown(runs, verdicts, expected),
     }
+
+
+def alert_block(store: Any, env: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
+    """aep.alerts.evaluate over the same read-only store, thresholds from ALERT_* env. JSON-safe. A malformed
+    threshold is reported in ``error`` rather than raised, so the page still renders."""
+    try:
+        settings = alerts.settings_from_env(os.environ if env is None else env)
+    except ValueError as exc:
+        return {"error": str(exc), "window_hours": None, "results": []}
+    return {"error": None, "window_hours": settings.window_hours,
+            "results": [r.to_dict() for r in alerts.evaluate(store, settings)]}
 
 
 # --------------------------------------------------------------------------- #
@@ -507,9 +555,13 @@ def _legend() -> str:
 
 def _tiles(s: Mapping[str, Any]) -> str:
     breakdown = "".join(_chip(k, f"{k} {s[k]}") for k in OUTCOMES)
+    not_run = s.get("skipped_not_run", 0)
+    if not_run:
+        breakdown += (f'<span>{_plural(s["verdicts"], "verdict")} + {not_run} documented '
+                      f'{"skip" if not_run == 1 else "skips"} not run</span>')
     tiles = [
         ("Runs", s["runs"], ""),
-        ("Verdicts", s["verdicts"], breakdown),
+        ("Outcomes", s.get("outcomes", s["verdicts"]), breakdown),
         ("Findings", s["findings"], ""),
         ("Cost", f"${s['cost_usd']:.4f}", "sum of AttackRun.cost_usd"),
         ("Latency p50", _ms(s["latency_p50_ms"]), f"per run, {_plural(s['latency_samples'], 'sample')}"),
@@ -520,11 +572,54 @@ def _tiles(s: Mapping[str, Any]) -> str:
         f'<div class="d">{d}</div></div>' for k, v, d in tiles) + "</div>"
 
 
-def _coverage(rows: list[dict[str, Any]]) -> str:
-    gaps = sum(r["gap"] for r in rows)
+_ALERT_CHIPS = {alerts.FIRING: ("fail", "firing"), alerts.OK: ("pass", "ok"),
+                alerts.INSUFFICIENT: ("error", "insufficient data")}
+
+
+def _alerts(block: Optional[Mapping[str, Any]]) -> str:
+    if not block:
+        return ""
+    results = block.get("results") or []
+    firing = sum(r["state"] == alerts.FIRING for r in results)
+    hours = block.get("window_hours")
+    window = f"the last {hours:g} h" if hours else "all runs"
+    head = (f'<section><div class="sechead"><div><h2>Alerts{f" · {firing} firing" if firing else ""}</h2>'
+            f'<div class="sub">Over {_e(window)}; thresholds from ALERT_* env. Same numbers as '
+            '<span class="mono">python3 scripts/alerts.py</span>; on-call actions in '
+            '<span class="mono">docs/ALERTS.md</span>.</div></div></div>')
+    if block.get("error"):
+        return f'{head}<div class="notice">Alerts not evaluated: {_e(block["error"])}</div></section>'
     body = "".join(
-        f'<tr class="{"gap" if r["gap"] else ""}"><td class="cat mono">{_e(r["category"])}'
-        f'{" " + _chip("gap", "no runs") if r["gap"] else ""}</td>'
+        f'<tr data-alert="{_e(r["key"])}" data-state="{_e(r["state"])}"><td>{_chip(*_ALERT_CHIPS[r["state"]])}</td>'
+        f'<td>{_e(r["title"])}</td><td class="n">{_e(alerts.format_value(r["value"], r["unit"]))}</td>'
+        f'<td class="n">{_e(alerts.format_value(r["threshold"], r["unit"]))}</td>'
+        f'<td class="wrap">{_e(r["detail"])}</td><td class="mono">{_e(r["runbook"])}</td></tr>'
+        for r in results)
+    return (f'{head}<div class="scroll"><table><thead><tr><th>State</th><th>Alert</th><th class="n">Value</th>'
+            '<th class="n">Threshold</th><th>Detail</th><th>Runbook</th></tr></thead>'
+            f'<tbody>{body}</tbody></table></div></section>')
+
+
+def _expected_skips(skips: list[dict[str, Any]]) -> str:
+    if not skips:
+        return ""
+    items = "".join(f'<li><span class="mono">{_e(s["case_id"])}</span> — {_e(s["reason"])}</li>' for s in skips)
+    return (f'<details class="sub" style="margin-top:10px"><summary>{_plural(len(skips), "case")} skipped — expected '
+            f'(documented limitation), not run</summary><ul>{items}</ul></details>')
+
+
+def _coverage(rows: list[dict[str, Any]], skips: Optional[list[dict[str, Any]]] = None) -> str:
+    gaps = sum(r["gap"] for r in rows)
+
+    def flag(r: Mapping[str, Any]) -> str:
+        if r["gap"]:
+            return " " + _chip("gap", "no runs")
+        if not r["runs"] and r.get("skipped_not_run"):
+            return " " + _chip("skipped", "documented limitation")
+        return ""
+
+    body = "".join(
+        f'<tr class="{"gap" if r["gap"] else ""}"><td class="cat mono">{_e(r["category"])}{flag(r)}</td>'
         + _num(r["cases"]) + _num(r["in_regression"]) + _num(r["runs"])
         + "".join(_num(r[k]) for k in (*OUTCOMES, "unjudged"))
         + f'<td class="n" data-sort="{r["cost_usd"]}">${r["cost_usd"]:.4f}</td><td>{_bar(r)}</td></tr>'
@@ -536,7 +631,7 @@ def _coverage(rows: list[dict[str, Any]]) -> str:
         '<div class="scroll"><table class="sortable"><thead><tr><th>Category</th><th class="n">Cases</th>'
         '<th class="n">In regression</th><th class="n">Runs</th><th class="n">Pass</th><th class="n">Partial</th>'
         '<th class="n">Fail</th><th class="n">Error</th><th class="n">Skipped</th><th class="n">Unjudged</th><th class="n">Cost</th>'
-        f'<th>Outcome mix</th></tr></thead><tbody>{body}</tbody></table></div></section>')
+        f'<th>Outcome mix</th></tr></thead><tbody>{body}</tbody></table></div>{_expected_skips(skips or [])}</section>')
 
 
 def _feed(rows: list[dict[str, Any]], total: int) -> str:
@@ -607,9 +702,15 @@ def _versions(rows: list[dict[str, Any]]) -> str:
         f'<th class="n">Fixes</th><th>Outcome mix</th></tr></thead><tbody>{body}</tbody></table></div></section>')
 
 
-def _signature(stats: Mapping[str, Any], findings: int) -> str:
-    """A compact string that changes iff a shown aggregate changed — the /watch poll's diff key."""
-    return json.dumps({"stats": stats, "findings": findings}, sort_keys=True, default=str)
+def _alert_states(block: Optional[Mapping[str, Any]]) -> dict[str, str]:
+    return {r["key"]: r["state"] for r in (block or {}).get("results") or []}
+
+
+def _signature(stats: Mapping[str, Any], findings: int, alert_states: Optional[Mapping[str, str]] = None) -> str:
+    """A compact string that changes iff a shown aggregate changed — the /watch poll's diff key. The page and
+    /data must build it from the same inputs, or --watch would reload forever."""
+    return json.dumps({"stats": stats, "findings": findings, "alerts": dict(alert_states or {})},
+                      sort_keys=True, default=str)
 
 
 def _watch_js(signature: str, interval_s: float) -> str:
@@ -630,12 +731,13 @@ def _watch_js(signature: str, interval_s: float) -> str:
 
 def render_html(data: Mapping[str, Any], watch: bool = False, interval_s: float = 3.0) -> str:
     notice = f'<div class="notice">{_e(data["notice"])}</div>' if data.get("notice") else ""
-    link_note = "" if data["langfuse_linked"] else " · Langfuse links off (set LANGFUSE_HOST + LANGFUSE_PROJECT_ID)"
+    missing = data.get("langfuse_missing") or ["LANGFUSE_HOST", "LANGFUSE_PROJECT_ID (or LANGFUSE_PROJECT_PATH)"]
+    link_note = "" if data["langfuse_linked"] else f" · Langfuse links off: set {' and '.join(missing)}"
     live = (f'<span style="color:var(--good);font-size:12px"> · ● live (every {_e(str(int(interval_s)))}s)</span>'
             if watch else "")
     watch_js = ""
     if watch:
-        sig = _signature(data["stats"], data["stats"].get("findings", 0))
+        sig = _signature(data["stats"], data["stats"].get("findings", 0), _alert_states(data.get("alerts")))
         watch_js = f"<script>{_watch_js(sig, interval_s)}</script>"
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -643,7 +745,8 @@ def render_html(data: Mapping[str, Any], watch: bool = False, interval_s: float 
         f'<title>AEP Dashboard</title><style>{_CSS}</style></head><body><main>'
         '<header><h1>Adversarial eval platform</h1>'
         f'<div class="sub">{_e(data["source"])} · generated {_e(_ts(data["generated_at"]))} · read-only{_e(link_note)}{live}</div>'
-        f'</header>{notice}{_tiles(data["stats"])}{_coverage(data["coverage"])}{_findings(data["findings"])}'
+        f'</header>{notice}{_tiles(data["stats"])}{_alerts(data.get("alerts"))}'
+        f'{_coverage(data["coverage"], data.get("expected_skips"))}{_findings(data["findings"])}'
         f'{_feed(data["feed"], data["feed_total"])}{_versions(data["versions"])}'
         f'</main><script>{_JS}</script>{watch_js}</body></html>')
 
@@ -662,16 +765,22 @@ def generate(db: str, watch: bool = False, interval_s: float = 3.0) -> str:
 
 
 def _aggregates(store: Any, db: str, notice: str = "") -> dict[str, Any]:
-    runs, verdicts, reports = store.list_runs(), store.list_verdicts(), store.list_reports()
-    stats = header_stats(runs, verdicts, reports, expected_map(store.list_cases()))
+    """The /data payload. Stats and alerts are computed exactly as build() does, so the signature matches the
+    page's and --watch reloads only on a real change."""
+    cases, runs = store.list_cases(), store.list_runs()
+    verdicts, reports = store.list_verdicts(), store.list_reports()
+    expected = expected_map(cases)
+    stats = header_stats(runs, verdicts, reports, expected, expected_not_run(cases, runs, expected))
+    alert_data = alert_block(store)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": db,
         "notice": notice,
         "stats": stats,
-        "coverage": coverage_matrix(store.coverage(), store.list_cases(), runs, verdicts),
+        "alerts": alert_data,
+        "coverage": coverage_matrix(store.coverage(), cases, runs, verdicts),
         "findings": len(reports),
-        "signature": _signature(stats, len(reports)),
+        "signature": _signature(stats, len(reports), _alert_states(alert_data)),
     }
 
 
@@ -692,7 +801,8 @@ def aggregates(db: str) -> dict[str, Any]:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "source": db,
             "error": f"{type(exc).__name__}: {exc}",
-            "stats": {}, "coverage": [], "findings": 0, "signature": "",
+            "stats": {}, "alerts": {"error": None, "window_hours": None, "results": []},
+            "coverage": [], "findings": 0, "signature": "",
         }
 
 

@@ -1,4 +1,5 @@
-"""Alert definitions over the store. Read-only: only ``list_runs()`` and ``list_verdicts()`` are called.
+"""Alert definitions over the store. Read-only: only ``list_runs()``, ``list_verdicts()`` and ``list_cases()``
+are called.
 
     from aep.alerts import evaluate
     results = evaluate(store)                    # thresholds and window from env
@@ -9,7 +10,9 @@ Three alerts, each over the runs started inside the window (default: the last 24
   p95_latency          p95 of end-to-end run latency (sum of AttackRun.latency_ms_by_step, the dashboard's
                        "Latency p95") above ALERT_P95_LATENCY_MS. Runs with no recorded steps are left out.
   error_rate           share of judged runs whose verdicts are all ERROR (the run could not be evaluated; the
-                       dashboard's "error" bucket) above ALERT_ERROR_RATE. Runs with no verdict yet are left out.
+                       dashboard's "error" bucket) above ALERT_ERROR_RATE. Runs with no verdict yet are left out,
+                       and so are ERRORs on cases tagged expected-inconclusive (aep/limitations.py): those are
+                       documented skips, the dashboard's "skipped", not platform errors.
   target_failure_rate  share of runs with at least one target or tool failure above ALERT_TARGET_FAILURE_RATE.
                        A failure is an HTTP 408, 429 or 5xx from the target in the transcript, or an observed tool
                        call reporting an error (outcome/status error|failed|failure|timeout, an error_type, or a
@@ -28,6 +31,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional
 
+from aep.limitations import expected_map
 from contracts.contracts import AttackRun, JudgeVerdict, Verdict
 
 FIRING, OK, INSUFFICIENT = "firing", "ok", "insufficient_data"
@@ -240,18 +244,24 @@ def _p95_latency(runs: list[AttackRun], settings: Settings) -> AlertResult:
                    {"p95_ms_by_step": dict(sorted(step_p95.items(), key=lambda kv: -kv[1]))}, slow)
 
 
-def _error_rate(runs: list[AttackRun], verdicts: list[JudgeVerdict], settings: Settings) -> AlertResult:
+def _error_rate(runs: list[AttackRun], verdicts: list[JudgeVerdict], settings: Settings,
+                expected: Mapping[str, str]) -> AlertResult:
     by_run: dict[str, list[JudgeVerdict]] = defaultdict(list)
     for v in verdicts:
         by_run[v.run_id].append(v)
     judged = [r for r in runs if by_run.get(r.run_id)]
-    errored = [r for r in judged if all(v.verdict == Verdict.ERROR for v in by_run[r.run_id])]
+    all_error = {r.run_id for r in judged if all(v.verdict == Verdict.ERROR for v in by_run[r.run_id])}
+    skips = [r for r in judged if r.run_id in all_error and r.case_id in expected]
+    judged = [r for r in judged if not (r.run_id in all_error and r.case_id in expected)]
+    errored = [r for r in judged if r.run_id in all_error]
     reasons = Counter(_error_reason(v) for r in errored for v in by_run[r.run_id])
     value = len(errored) / len(judged) if judged else None
-    unjudged = len(runs) - len(judged)
+    unjudged = len(runs) - len(judged) - len(skips)
     detail = f"{len(errored)} of {len(judged)} judged runs errored"
     if unjudged:
         detail += f"; {unjudged} not judged yet"
+    if skips:
+        detail += f"; {len(skips)} expected skips (documented limitation) excluded"
     return _result(BY_KEY["error_rate"], settings, value, len(judged), detail,
                    {"reasons": _top(reasons)}, [r.correlation_id for r in errored])
 
@@ -268,7 +278,7 @@ def _target_failure_rate(runs: list[AttackRun], settings: Settings) -> AlertResu
 
 def evaluate(store: Any, settings: Optional[Settings] = None, *, now: Optional[datetime] = None
              ) -> list[AlertResult]:
-    """Every alert in DEFINITIONS order. Calls only store.list_runs() and store.list_verdicts()."""
+    """Every alert in DEFINITIONS order. Calls only store.list_runs(), list_verdicts() and list_cases()."""
     settings = settings or settings_from_env()
     now = now or datetime.now(timezone.utc)
     runs = _in_window(store.list_runs(), settings, now)
@@ -276,7 +286,7 @@ def evaluate(store: Any, settings: Optional[Settings] = None, *, now: Optional[d
     verdicts = [v for v in store.list_verdicts() if v.run_id in ids]
     return [
         _p95_latency(runs, settings),
-        _error_rate(runs, verdicts, settings),
+        _error_rate(runs, verdicts, settings, expected_map(store.list_cases())),
         _target_failure_rate(runs, settings),
     ]
 

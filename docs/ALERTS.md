@@ -2,8 +2,9 @@
 
 Three alerts are computed over the store: latency, evaluation errors, and tool or target failures.
 They are defined in `aep/alerts.py` and evaluated by `scripts/alerts.py`. Evaluation is read-only:
-the store is opened with `SqliteStore.open_readonly` (SQLite `mode=ro`), and only `list_runs()` and
-`list_verdicts()` are called.
+the store is opened with `SqliteStore.open_readonly` (SQLite `mode=ro`), and only `list_runs()`,
+`list_verdicts()` and `list_cases()` are called. The dashboard shows the same alerts near the top
+of the page, and its `/data` JSON includes them.
 
 ```sh
 python3 scripts/alerts.py                    # seeds.db, last 24 h, thresholds from ALERT_* env
@@ -78,7 +79,9 @@ page-worthy outage on its own unless the other two alerts are also firing.
 
 **What it measures.** The share of judged runs whose verdicts are all `ERROR`. A run is ERROR when it
 could not be evaluated. This is the dashboard's "error" bucket. Runs with no verdict yet are left out of
-the denominator, and the detail line reports how many there are. The breakdown counts the oracle and the
+the denominator, and the detail line reports how many there are. So are ERRORs on cases tagged
+`oracle_config.known_limitation` (see `aep/limitations.py`). Those are documented skips, which the
+dashboard shows as "skipped" rather than as platform errors. The breakdown counts the oracle and the
 evidence `reason` of each ERROR verdict.
 
 **Why 10%.** Every errored run is an attack case with no verdict, so coverage shrinks without any warning.
