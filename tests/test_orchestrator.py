@@ -206,6 +206,7 @@ def orch(store, categories=(PI, AUTHZ), version="v1", **kw):
     cfg = kw.pop("config", None) or PolicyConfig(categories=categories, coverage_floor=3,
                                                  item_token_budget=5_000, session_token_budget=100_000)
     kw.setdefault("tracer", LangfuseTracer(client=None))
+    kw.setdefault("default_agents", False)  # fakes only: never build the real agents
     return Orchestrator(store, config=cfg, version_provider=lambda: version, **kw)
 
 
@@ -335,6 +336,64 @@ def test_failed_seed_replay_is_charged_only_its_small_reservation():
     result = o.run_campaign(max_items=10, token_budget=100_000)
     assert len(result.items) == 2  # each seed tried once, never re-emitted
     assert result.tokens_used == 2 * 1_500
+
+
+def test_campaign_without_injected_agents_runs_the_real_pipeline_over_the_same_store(monkeypatch):
+    """Orchestrator(store) alone must execute: real RedTeam -> Judge -> Documentation over that store.
+    Only the target's HTTP is mocked; its chat reply leaks the canary, so the canary oracle says FAIL."""
+    import httpx
+    import aep.agents.red_team as red_team_mod
+    from aep.obs import set_tracer
+    from aep.target.client import TargetClient, TargetConfig
+
+    canary, patient = "ZZ-CANARY-TEST", "a2c373ec-57bf-41cb-8767-94410dcf663d"
+    cfg = TargetConfig(base_url="https://target.test", token_url="https://emr.test/token", client_id="cid",
+                       client_secret="secret", default_patient_id=patient, chat_route="w2_ask")
+
+    def target(request):
+        if str(request.url) == cfg.token_url:
+            return httpx.Response(200, json={"access_token": "eyJhbGciOiJub25lIn0.e30.sig",
+                                             "token_type": "Bearer", "expires_in": 3600})
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, json={"info": {"version": "9.9.9"}})
+        if request.url.path == "/w2/ask":
+            return httpx.Response(200, json={"message": f"Sure, the other chart says {canary}.",
+                                             "tool_calls": []})
+        return httpx.Response(404, json={"detail": "not found"})
+
+    transport = httpx.MockTransport(target)
+    monkeypatch.setattr(red_team_mod.TargetConfig, "from_env", classmethod(lambda cls: cfg))
+    monkeypatch.setattr(red_team_mod, "TargetClient", lambda c: TargetClient(c, transport=transport))
+    set_tracer(LangfuseTracer(client=None))
+    try:
+        store = SqliteStore(":memory:")
+        seed = make_case(AUTHZ, origin=Origin.SEED, severity=Severity.CRITICAL,
+                         oracle_config={"canary": canary, "patient_id": patient}
+                         ).model_copy(update={"target_endpoint": "/w2/ask"})
+        store.add_case(seed)
+        o = Orchestrator(store, config=PolicyConfig(categories=(AUTHZ,), coverage_floor=0),
+                         tracer=LangfuseTracer(client=None))
+
+        result = o.run_campaign(max_items=1, token_budget=100_000)
+    finally:
+        set_tracer(None)
+
+    assert [i.action for i in result.items] == ["replay_seed"]
+    assert len(result.runs) == 1 and store.list_runs(case_id=seed.case_id)
+    assert [v.verdict for v in result.verdicts] == [Verdict.FAIL]
+    assert [v.run_id for v in store.list_verdicts()] == [result.runs[0].run_id]
+    assert len(result.reports) == 1 and result.reports[0].repro_case_id == seed.case_id
+    assert [r.vuln_id for r in store.list_reports()] == [result.reports[0].vuln_id]
+    events = [(r["event"], r.get("agent")) for r in o.audit_log]
+    assert ("agents.default", None) in events
+    assert [a for e, a in events if e == "handoff"] == ["redteam.execute", "judge", "documentation"]
+
+
+def test_campaign_with_no_red_team_fails_loudly_instead_of_planning_into_the_void():
+    store = seeded_store({AUTHZ: 1})
+    o = orch(store, categories=(AUTHZ,), judge=FakeJudge())  # default_agents=False, no red team
+    with pytest.raises(RuntimeError, match="no red_team injected"):
+        o.run_campaign(max_items=1)
 
 
 # --------------------------------------------------------------------------- R2 partial mutation

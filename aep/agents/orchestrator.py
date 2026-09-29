@@ -25,9 +25,13 @@ replayed once per session, because they are the baseline every campaign re-check
 cases are replayed only if the Store has never run them. Seed replays reserve ``seed_token_budget``,
 not ``item_token_budget``, so planned LLM work can't lock up the session budget before a seed runs.
 
-Agents are injected, not imported, so this module has no dependency on the Red Team / Judge /
-Documentation packages and can be tested with fakes. Each dependency may be an object with one of the
-method names below, or a plain callable. Sync and async implementations are both accepted.
+Agents are normally injected, which lets the module be tested with fakes. An agent that isn't injected
+is built at the start of a campaign or regression run over the Orchestrator's own store, as
+``RedTeam(store)``, ``Judge(store)`` and ``Documentation(store)``, the same pipeline as
+``scripts/run_campaign_seeds.py``. Those imports are lazy, so importing this module never pulls in the
+agents. Pass ``default_agents=False`` to keep missing agents missing. Each dependency may be an object
+with one of the method names below, or a plain callable. Sync and async implementations are both
+accepted.
 
     red_team.execute(item: WorkItem)                 -> AttackRun | list[AttackRun]  (or run_work_item)
     red_team.replay(case: AttackCase[, target_version=...]) -> AttackRun | list[AttackRun]
@@ -159,15 +163,14 @@ class Orchestrator:
     def __init__(self, store: Any, *, red_team: Any = None, judge: Any = None, documentation: Any = None,
                  version_provider: Optional[Callable[[], Any]] = None, config: Optional[PolicyConfig] = None,
                  tracer: Any = None, last_seen_version: Optional[str] = None,
-                 session_id: Optional[str] = None) -> None:
+                 session_id: Optional[str] = None, default_agents: bool = True) -> None:
         self.store = store
         self.config = config or PolicyConfig()
         self.session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._tracer = tracer
-        self._execute = _bind(red_team, ("execute", "run", "run_work_item"), "red_team")
-        self._replay = _bind(red_team, ("replay", "run_case", "execute_case"), "red_team", allow_call=False)
-        self._judge = _bind(judge, ("judge", "evaluate"), "judge")
-        self._document = _bind(documentation, ("document", "write_report", "report"), "documentation")
+        self._execute = self._replay = self._judge = self._document = None
+        self._bind_agents(red_team, judge, documentation)
+        self._default_agents = default_agents
         self._version_provider = version_provider
 
         self._last_seen_version = last_seen_version or self._latest_run_version()
@@ -184,6 +187,37 @@ class Orchestrator:
 
         self.audit_log: list[dict] = []
         self.decisions: list[dict] = []
+
+    # ---- agents ----------------------------------------------------------------------------------
+
+    def _bind_agents(self, red_team: Any = None, judge: Any = None, documentation: Any = None) -> None:
+        if red_team is not None:
+            self._execute = _bind(red_team, ("execute", "run", "run_work_item"), "red_team")
+            self._replay = _bind(red_team, ("replay", "run_case", "execute_case"), "red_team",
+                                 allow_call=False)
+        if judge is not None:
+            self._judge = _bind(judge, ("judge", "evaluate"), "judge")
+        if documentation is not None:
+            self._document = _bind(documentation, ("document", "write_report", "report"), "documentation")
+
+    def _ensure_agents(self) -> None:
+        """Build any agent that wasn't injected, over this Orchestrator's store. Done at the start of a
+        run rather than in __init__, so planning-only use (next_work_item) needs no target config."""
+        if not self._default_agents:
+            return
+        built = {}
+        if self._execute is None:
+            from aep.agents.red_team import RedTeam
+            built["red_team"] = RedTeam(store=self.store)
+        if self._judge is None:
+            from aep.agents.judge import Judge
+            built["judge"] = Judge(store=self.store)
+        if self._document is None:
+            from aep.agents.documentation import Documentation
+            built["documentation"] = Documentation(store=self.store)
+        if built:
+            self._bind_agents(**built)
+            self._audit({"event": "agents.default", "session_id": self.session_id, "built": sorted(built)})
 
     # ---- budget ----------------------------------------------------------------------------------
 
@@ -517,6 +551,7 @@ class Orchestrator:
 
     async def arun_regression(self, target_version: str, previous_version: Optional[str] = None
                               ) -> list[RegressionOutcome]:
+        self._ensure_agents()
         cid = f"regr_{uuid4().hex[:12]}"
         prev = previous_version or self._prior_version(target_version)
         before = self.store.regression_results(prev) if prev else {}
@@ -602,6 +637,7 @@ class Orchestrator:
     async def arun_campaign(self, max_items: int, token_budget: Optional[int] = None) -> CampaignResult:
         if token_budget is not None:
             self.reset_budget(token_budget)
+        self._ensure_agents()
         result = CampaignResult(session_id=self.session_id)
         self._audit({"event": "campaign.start", "correlation_id": self.session_id, "max_items": max_items,
                      "token_budget": self._budget_total})
@@ -626,6 +662,9 @@ class Orchestrator:
     async def _dispatch(self, item: WorkItem, result: CampaignResult) -> None:
         """WorkItem -> Red Team -> Judge -> (FAIL) Documentation, each handoff traced."""
         action = getattr(item, "action", None)
+        # Outside the try: with no Red Team every item would "fail" silently and the campaign would end
+        # with planned items and zero runs.
+        execute = self._require(self._execute, "red_team")
         try:
             if action in ("replay_seed", "reverify") and self._replay is not None and item.seed_case_id:
                 case = self.store.get_case(item.seed_case_id)
@@ -634,7 +673,7 @@ class Orchestrator:
                     "redteam.replay", lambda: _call_flex(fn, case, target_version=self._current_version),
                     correlation_id=self.session_id, work_id=item.work_id, case_id=case.case_id))
             else:
-                fn = self._require(self._execute, "red_team")
+                fn = execute
                 runs = _as_list(await self._handoff("redteam.execute", lambda: fn(item),
                                                     correlation_id=self.session_id, work_id=item.work_id,
                                                     category=item.target_category.value))
