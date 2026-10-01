@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
@@ -249,6 +250,39 @@ _PROFILES: dict[AttackCategory, _Profile] = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# Burst (cost_amplification_dos): fire K briefs to demonstrate ABSENCE of rate
+# limiting. Capped hard — we prove there is no throttling, we do NOT DoS our own
+# deployment. DEFAULT_BURST is used when a case asks for a burst without a usable
+# count; BURST_HARD_MAX is never exceeded no matter what a case asks for.
+# --------------------------------------------------------------------------- #
+DEFAULT_BURST = 20
+BURST_HARD_MAX = 30
+
+
+def _burst_count(oracle_config: Optional[dict]) -> int:
+    """How many requests the burst should send: 0 when the case asks for none.
+
+    ``{"burst": K}`` -> min(K, BURST_HARD_MAX); ``{"burst": true}`` or a
+    non-numeric truthy value -> DEFAULT_BURST (also capped). Zero/negative/false
+    -> 0 (no burst). The cap is a hard ceiling (never exceed BURST_HARD_MAX).
+    """
+    cfg = oracle_config or {}
+    if "burst" not in cfg:
+        return 0
+    raw = cfg["burst"]
+    if raw is True:
+        k = DEFAULT_BURST
+    else:
+        try:
+            k = int(raw)
+        except (TypeError, ValueError):
+            k = DEFAULT_BURST
+    if k <= 0:
+        return 0
+    return min(k, BURST_HARD_MAX)
+
+
 def _route_for(endpoint: str) -> Optional[str]:
     """Map a case's target_endpoint to a TargetClient.chat() route key."""
     ep = (endpoint or "").lower()
@@ -311,10 +345,14 @@ class RedTeam:
                 "halting before execution for case %s",
                 work.token_budget, used, case.case_id,
             )
-            return self._finalize(case, correlation_id, [], [], "unknown")
+            return self._finalize(case, correlation_id, [], [], [], "unknown")
 
-        transcript, tool_calls, version = asyncio.run(self._execute(case, correlation_id))
-        return self._finalize(case, correlation_id, transcript, tool_calls, version)
+        transcript, tool_calls, request_results, version = asyncio.run(
+            self._execute(case, correlation_id)
+        )
+        return self._finalize(
+            case, correlation_id, transcript, tool_calls, request_results, version
+        )
 
     # -- generation --------------------------------------------------------- #
     def _generation_prompt(self, category: AttackCategory) -> str:
@@ -359,12 +397,14 @@ class RedTeam:
     # -- execution ---------------------------------------------------------- #
     async def _execute(
         self, case: AttackCase, correlation_id: str
-    ) -> tuple[list[ConversationTurn], list[dict], str]:
+    ) -> tuple[list[ConversationTurn], list[dict], list[dict], str]:
         patient_id = self._patient_id_for(case)
         route = _route_for(case.target_endpoint)
         brief = _is_brief(case.target_endpoint)
+        burst = _burst_count(case.oracle_config) if brief else 0
         transcript: list[ConversationTurn] = []
         tool_calls: list[dict] = []
+        request_results: list[dict] = []
         version = "unknown"
 
         client = self._target_factory()
@@ -380,6 +420,22 @@ class RedTeam:
                     version = await client.target_version() or "unknown"
                 except Exception:  # meta call; never fail the run over it
                     log.debug("red-team: target_version() unavailable", exc_info=True)
+
+                # cost_amplification_dos: fire a capped burst of briefs and record
+                # each response envelope, so the RATE_LIMIT oracle can see whether
+                # the target throttled any of them. This REPLACES the per-turn
+                # replay for the brief (the attack IS the burst).
+                if burst:
+                    request_results = await self._do_burst(
+                        client, span, case, patient_id, burst, correlation_id
+                    )
+                    first = case.turns[0].content if case.turns else "[burst of /pre-visit-brief requests]"
+                    transcript.append(ConversationTurn(role="user", content=first))
+                    transcript.append(
+                        ConversationTurn(role="assistant", content=_describe_burst(request_results))
+                    )
+                    span.set_output({"burst": len(request_results), "turns": len(transcript)})
+                    return transcript, tool_calls, request_results, version
 
                 conversation_id: Optional[str] = None
                 doc_ids: list[str] = []
@@ -426,7 +482,7 @@ class RedTeam:
         finally:
             await client.aclose()
 
-        return transcript, tool_calls, version
+        return transcript, tool_calls, request_results, version
 
     async def _do_upload(
         self, client: TargetClient, span: Any, case: AttackCase,
@@ -462,6 +518,45 @@ class RedTeam:
             result={"status_code": resp.get("status_code"), "session_id": resp.get("conversation_id")},
         )
         return resp
+
+    async def _do_burst(
+        self, client: TargetClient, span: Any, case: AttackCase,
+        patient_id: Optional[str], k: int, correlation_id: str,
+    ) -> list[dict]:
+        """Send ``k`` back-to-back briefs and record each response envelope.
+
+        ``k`` is already capped at BURST_HARD_MAX by ``_burst_count``; we assert
+        it here too so no future caller can slip past the ceiling. Requests are
+        issued sequentially (one in flight at a time): enough to show a real rate
+        limiter would have throttled, gentle enough not to hammer our own target.
+        The target never raises on status (``pre_visit_brief`` returns an
+        envelope), so a per-request 429 is recorded, not swallowed.
+        """
+        if not patient_id:
+            raise ValueError(
+                f"burst case {case.case_id} has no patient_id: set oracle_config.patient_id"
+            )
+        assert k <= BURST_HARD_MAX, f"burst {k} exceeds hard max {BURST_HARD_MAX}"
+
+        results: list[dict] = []
+        started = time.perf_counter()
+        for i in range(k):
+            resp = await client.pre_visit_brief(patient_id, correlation_id=correlation_id)
+            results.append({
+                "index": i,
+                "status_code": resp.get("status_code"),
+                "latency_ms": resp.get("latency_ms"),
+            })
+        wall_s = round(time.perf_counter() - started, 6)
+
+        statuses = [r["status_code"] for r in results]
+        span.set_metadata(burst_sent=k, burst_wall_s=wall_s, burst_count_429=statuses.count(429))
+        span.tool_call(
+            "target.pre_visit_brief.burst",
+            args={"patient_id": patient_id, "count": k},
+            result={"status_codes": statuses, "wall_s": wall_s},
+        )
+        return results
 
     async def _do_chat(
         self, client: TargetClient, span: Any, turn: ConversationTurn,
@@ -506,7 +601,8 @@ class RedTeam:
 
     def _finalize(
         self, case: AttackCase, correlation_id: str,
-        transcript: list[ConversationTurn], tool_calls: list[dict], version: str,
+        transcript: list[ConversationTurn], tool_calls: list[dict],
+        request_results: list[dict], version: str,
     ) -> AttackRun:
         s = self.tracer.summary(correlation_id)
         cfg = case.oracle_config or {}
@@ -518,6 +614,7 @@ class RedTeam:
             target_version=version or "unknown",
             transcript=transcript,
             tool_calls_observed=tool_calls,
+            request_results=request_results,
             tokens_prompt=int(s.get("tokens_prompt", 0)),
             tokens_completion=int(s.get("tokens_completion", 0)),
             cost_usd=float(s.get("cost_usd", 0.0)),
@@ -550,6 +647,16 @@ def _describe_response(resp: dict) -> str:
     canary anywhere in the body (not just the prose brief) stays visible."""
     return json.dumps(
         {"status_code": resp.get("status_code"), "body": resp.get("body")},
+        default=str, sort_keys=True,
+    )
+
+
+def _describe_burst(results: list[dict]) -> str:
+    """A compact JSON summary of the burst for the transcript. The RATE_LIMIT
+    oracle reads the structured run.request_results, not this prose."""
+    statuses = [r.get("status_code") for r in results]
+    return json.dumps(
+        {"burst_requests": len(results), "status_codes": statuses, "count_429": statuses.count(429)},
         default=str, sort_keys=True,
     )
 

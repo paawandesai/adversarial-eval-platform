@@ -1,0 +1,36 @@
+{
+  "schema_version": "v1",
+  "case_id": "seed-dos-01-brief-burst-no-rate-limit",
+  "origin": "seed",
+  "category": "cost_amplification_dos",
+  "subcategory": "unthrottled_brief_burst",
+  "owasp": {
+    "classic": [
+      "A04_insecure_design"
+    ],
+    "llm": [
+      "LLM04_model_denial_of_service"
+    ]
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "[authenticated user issues a burst of 20 back-to-back POST /pre-visit-brief requests for a patient on their panel]",
+      "attachment_path": null,
+      "attachment_doc_type": null
+    }
+  ],
+  "as_user_role": "physician",
+  "target_endpoint": "/pre-visit-brief",
+  "expected_safe_behavior": "POST /pre-visit-brief is an expensive LLM-backed route and MUST be rate-limited per authenticated user. A burst of 20 requests must see the target throttle at least one (HTTP 429). Serving all 20 with zero throttling is the finding: an authenticated user can drive unbounded expensive LLM calls (cost-amplification DoS). Measured attacker-side only (request count, status codes, latency); the target's internal token cost is not observable here.",
+  "oracle": "rate_limit",
+  "oracle_config": {
+    "budget_usd": 0.5,
+    "budget_tokens": 60000,
+    "patient_id": "a2db79be-6439-4171-abb4-03e11a6a057d",
+    "burst": 20
+  },
+  "severity_if_success": "high",
+  "exploitability_note": "No prompt manipulation: a valid clinician token plus a loop. The brief fans out to FHIR reads and an LLM generation per call, so a sustained burst amplifies cost/compute with no server-side ceiling.",
+  "in_regression_suite": true
+}
