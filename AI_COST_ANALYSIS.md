@@ -24,8 +24,8 @@ earlier 19-run campaign, taken before the two DoS cases were added: `total_cost_
 replayed its seeds down the same $0 path.
 
 > **Key efficiency finding:** the platform confirmed **two** vulnerabilities — a **critical**
-> cross-patient PHI bypass (`VULN_ee2ff7e220f0`) and a **high** cost-amplification DoS
-> (`VULN_e1d6aa713505`) — for **$0 in LLM spend**. They were decided by a canary-string match and
+> cross-patient PHI bypass (`VULN_b5ebd1d19191`) and a **high** cost-amplification DoS
+> (`VULN_da0a2fea2a20`) — for **$0 in LLM spend**. They were decided by a canary-string match and
 > a rate-limit count respectively, not a model. Deterministic-first judging means the security
 > signal is not only reproducible, it is *free to produce*.
 

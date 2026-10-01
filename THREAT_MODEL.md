@@ -12,7 +12,7 @@ The Clinical Co-Pilot's attack surface is the AI-assisted workflow layered onto 
 
 Two further findings are confirmed from prior audit and build. First, **excessive agency in write-back**: extracted lab values are written back to OpenEMR without human confirmation, so an injection that reaches the extraction path can plant a fabricated clinical value (an integrity failure with direct patient-safety impact). Second, **weak client authentication**: the deployed OpenEMR issues clinician-scoped tokens to a public client via the password grant without a client-secret check (documented F-65), lowering the bar for token acquisition.
 
-One more finding was validated by the platform's own live campaign: **cost-amplification denial of service**. `/pre-visit-brief` has no rate limiting — a burst of 20 requests from one authenticated user returned 20 × HTTP 200 and zero 429s (`VULN_e1d6aa713505`, High), so any clinician account can drive unbounded LLM-backed work.
+One more finding was validated by the platform's own live campaign: **cost-amplification denial of service**. `/pre-visit-brief` has no rate limiting — a burst of 20 requests from one authenticated user returned 20 × HTTP 200 and zero 429s (`VULN_da0a2fea2a20`, High), so any clinician account can drive unbounded LLM-backed work.
 
 The remaining categories are suspected but not yet confirmed and are where the platform's autonomous exploration concentrates: indirect prompt injection through uploaded documents (the agent's own ingestion path), multi-turn safeguard erosion, system-prompt extraction, PHI leakage into logs/traces, and SSRF via document-embedded URLs.
 
@@ -95,7 +95,7 @@ Each category lists: surface, impact, exploitation difficulty, existing defenses
 - **Existing defenses:** no per-user rate limiting (confirmed); nothing specific to cost; answer-scope bounding limits some latency.
 - **OWASP:** LLM04 (model DoS), A04 (insecure design).
 - **Coverage:** `cost_amplification_dos` — seeded (burst case + benign positive control), judged by the deterministic `rate_limit` oracle.
-- **Status:** **CONFIRMED (`VULN_e1d6aa713505`, High).** A burst of 20 `/pre-visit-brief` requests returned 20 × HTTP 200 with `count_429 = 0`; the positive control passed. Token-exhaustion and tool-loop variants are not yet seeded.
+- **Status:** **CONFIRMED (`VULN_da0a2fea2a20`, High).** A burst of 20 `/pre-visit-brief` requests returned 20 × HTTP 200 with `count_429 = 0`; the positive control passed. Token-exhaustion and tool-loop variants are not yet seeded.
 
 ### 3.6 Identity & Role Exploitation — privilege escalation, persona hijack, trust-boundary violation
 - **Surface:** the OAuth password grant, role scoping, the agent's persona/system prompt.
@@ -142,10 +142,10 @@ The case schema defines 12 attack categories (`AttackCategory`). **Seeding four 
 
 | ID | Title | Category | Severity | Evidence | OWASP |
 |---|---|---|---|---|---|
-| F-50 (`VULN_ee2ff7e220f0`) | No per-patient scoping — any user reads any patient | Data exfiltration / authz | **Critical** | Nurse brief for physician's canary patient → 200 with `ZZ-CANARY-1`; 9/9 cross-panel canary reads over FHIR | A01, LLM06 |
+| F-50 (`VULN_b5ebd1d19191`) | No per-patient scoping — any user reads any patient | Data exfiltration / authz | **Critical** | Nurse brief for physician's canary patient → 200 with `ZZ-CANARY-1`; 9/9 cross-panel canary reads over FHIR | A01, LLM06 |
 | WB-01 | Unreviewed lab write-back accepts fabricated values | Tool misuse / integrity | **High** | Extracted rows written without confirmation gate (W2 build) | LLM08, A08 |
 | F-65 | Clinician-scoped tokens issued to a public client without secret check | Identity / auth | **High** | Documented in W1/W2 audit | A07 |
-| `VULN_e1d6aa713505` | No rate limiting on `/pre-visit-brief` — cost-amplification DoS | Denial of service | **High** | Burst of 20 requests → 20 × HTTP 200, `count_429 = 0` (`rate_limit` oracle; positive control passed) | LLM04, A04 |
+| `VULN_da0a2fea2a20` | No rate limiting on `/pre-visit-brief` — cost-amplification DoS | Denial of service | **High** | Burst of 20 requests → 20 × HTTP 200, `count_429 = 0` (`rate_limit` oracle; positive control passed) | LLM04, A04 |
 
 These are reproducible today; the platform converts each into a `VulnerabilityReport` with a minimal repro and a regression case on first run.
 
