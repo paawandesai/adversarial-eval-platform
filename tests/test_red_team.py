@@ -52,6 +52,7 @@ TOKEN_URL = "https://emr.test/oauth2/default/token"
 PATIENT = "a2c373ec-57bf-41cb-8767-94410dcf663d"
 TOKEN = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyLTEifQ.sig"
 ATTACK_PATHS = {"/documents", "/w2/ask", "/pre-visit-brief/conversation"}
+TARGET_SHA = "3f9a1c7d2e4b5a6978c0d1e2f3a4b5c6d7e8f901"
 
 
 class Recorder:
@@ -71,8 +72,8 @@ class Recorder:
                 "access_token": TOKEN, "token_type": "Bearer",
                 "expires_in": 3600, "scope": "openid",
             })
-        if request.method == "GET" and path == "/openapi.json":
-            return httpx.Response(200, json={"info": {"version": "9.9.9"}})
+        if request.method == "GET" and path == "/version":
+            return httpx.Response(200, json={"commit": TARGET_SHA, "built_at": "2026-09-30T12:00:00Z"})
         if request.method == "POST" and path == "/documents":
             return httpx.Response(200, headers=echo, json={
                 "document_id": "doc-xyz", "status": "queued",
@@ -176,7 +177,7 @@ def test_run_work_item_replays_multi_turn_case(tmp_path):
 
     assert isinstance(run, AttackRun)
     assert run.case_id == "seed-test-ipi"
-    assert run.target_version == "9.9.9"
+    assert run.target_version == TARGET_SHA  # the /version commit, not a semver placeholder
 
     # The upload happened, then two chat turns to /w2/ask (they carry doc_ids).
     doc_uploads = [r for r in recorder.requests if r.url.path == "/documents"]

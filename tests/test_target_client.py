@@ -465,6 +465,74 @@ def test_concurrent_users_share_one_http_client():
     assert all(r["status_code"] == 200 for r in results)
 
 
+# ---------------------------------------------------------- target version
+
+SHA = "9dc97b5e4f0a1c2d3b4a5968778695a4b3c2d1e0"
+
+
+def version_requests(fake: FakeTarget) -> list[httpx.Request]:
+    return [r for r in fake.requests if r.url.path == "/version"]
+
+
+def test_target_version_is_the_version_commit_sha_fetched_once():
+    fake = FakeTarget()
+    fake.on(
+        "GET",
+        "/version",
+        lambda r: httpx.Response(200, json={"commit": SHA, "built_at": "2026-09-30T12:00:00Z"}),
+    )
+
+    async def go():
+        # Unauthenticated route: no authenticate() needed first.
+        async with TargetClient(config(), transport=httpx.MockTransport(fake)) as client:
+            return [await client.target_version() for _ in range(3)]
+
+    assert run(go()) == [SHA, SHA, SHA]
+    assert len(version_requests(fake)) == 1  # cached per client
+    assert "Authorization" not in version_requests(fake)[0].headers
+    assert fake.token_calls == 0
+
+
+def test_target_version_falls_back_to_unknown_when_unreachable():
+    fake = FakeTarget()
+
+    def boom(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    fake.on("GET", "/version", boom)
+
+    async def go():
+        async with TargetClient(config(), transport=httpx.MockTransport(fake)) as client:
+            down = await client.target_version()
+            # The fallback is not cached: once /version answers, the SHA is picked up.
+            fake.on("GET", "/version", lambda r: httpx.Response(200, json={"commit": SHA}))
+            return down, await client.target_version()
+
+    assert run(go()) == ("unknown", SHA)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(404, json={"detail": "Not Found"}),
+        httpx.Response(200, json={"built_at": "2026-09-30T12:00:00Z"}),
+        httpx.Response(200, json={"commit": ""}),
+        httpx.Response(200, json={"commit": None}),
+        httpx.Response(502, text="Bad Gateway"),
+    ],
+    ids=["no-route", "no-commit", "empty-commit", "null-commit", "non-json"],
+)
+def test_target_version_falls_back_to_unknown_without_a_commit(response):
+    fake = FakeTarget()
+    fake.on("GET", "/version", lambda r: response)
+
+    async def go():
+        async with TargetClient(config(), transport=httpx.MockTransport(fake)) as client:
+            return await client.target_version()
+
+    assert run(go()) == "unknown"
+
+
 # ------------------------------------------------------------ AuditReader
 
 
