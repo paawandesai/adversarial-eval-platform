@@ -39,7 +39,7 @@ $EDITOR .env
 set -a; . ./.env; set +a      # load into the current shell
 ```
 
-**2. Load the seed cases into the store.** Validates all 19 seeds, then inserts them into a
+**2. Load the seed cases into the store.** Validates all 21 seeds, then inserts them into a
 SQLite store (`seeds.db`):
 
 ```bash
@@ -54,7 +54,7 @@ python3 scripts/run_campaign_seeds.py
 ```
 
 ```bash
-python3 -c "from aep.store.sqlite_store import SqliteStore; from aep.agents.orchestrator import Orchestrator; print(Orchestrator(SqliteStore('seeds.db')).run_campaign(max_items=19))"
+python3 -c "from aep.store.sqlite_store import SqliteStore; from aep.agents.orchestrator import Orchestrator; print(Orchestrator(SqliteStore('seeds.db')).run_campaign(max_items=21))"
 ```
 
 `run_campaign` returns a `CampaignResult` (runs, verdict breakdown, reports, cost) — the shape

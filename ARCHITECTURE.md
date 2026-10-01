@@ -21,6 +21,8 @@ All inter-agent communication uses versioned Pydantic contracts (`contracts/`) a
 
 The platform already has a confirmed finding in hand: the target enforces **no per-patient scoping (F-50)** — measured, not hypothesized — which the platform reproduces on its first cross-panel probe. The design's north star is a hospital-CISO standard: every finding traces through the agents that produced it, every verdict carries evidence, and every fix is validated by replay.
 
+*Note: a targeted panel-scoping fix for F-50 (on `/pre-visit-brief` only) was demonstrated on the live host and then reverted so the finding stays reproducible — see VULNERABILITY_REPORTS VULN-1. The target as described here is the reverted, unscoped build.*
+
 ---
 
 ## 2. System Overview
