@@ -8,7 +8,7 @@ confirmed exploits into a versioned regression suite. Each attack ships with a b
 positive-control twin so a "fix" that merely breaks the workflow is caught rather than passed.
 
 - **Threat model & scope:** [`THREAT_MODEL.md`](THREAT_MODEL.md)
-- **Success metrics (first live campaign):** [`KEY_METRICS.md`](KEY_METRICS.md)
+- **Success metrics (latest campaign):** [`KEY_METRICS.md`](KEY_METRICS.md)
 - **Findings:** [`VULNERABILITY_REPORTS.md`](VULNERABILITY_REPORTS.md)
 - **Architecture & tradeoffs:** [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
@@ -17,7 +17,7 @@ positive-control twin so a "fix" that merely breaks the workflow is caught rathe
 ```
 aep/            agents (red team, judge, documentation, orchestrator), oracles, target client, obs, store
 contracts/      Pydantic contracts (AttackCase, AttackRun, JudgeVerdict, …) — the source of truth
-evals/seeds/    19 hand-authored seed AttackCases across 3 categories, + reviewable fixtures
+evals/seeds/    21 hand-authored seed AttackCases across 4 categories, + reviewable fixtures
 scripts/        load_seeds, run_campaign_seeds, dashboard, smoke_target, probes
 tests/          pytest suite
 ```
@@ -28,6 +28,12 @@ The deployed target is **`https://64.177.42.210:8443`** (OAuth token endpoint
 `https://64.177.42.210:9300/oauth2/default/token`; the host uses a self-signed cert, so TLS
 verification is off by default). It is reached only over its public HTTP API. Platform egress is
 allowlisted to this host (a safety control on the tester itself — see THREAT_MODEL §5).
+
+**0. Install dependencies.** Python 3.9+:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
 
 **1. Configure the environment.** Copy the template and fill in the secrets. `.env` is
 gitignored; the seeded-user **credentials come from a gitignored creds file**

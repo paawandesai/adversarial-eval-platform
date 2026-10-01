@@ -11,8 +11,8 @@ This platform is a four-agent adversarial evaluation system built as its own rep
 We reject a single-agent or pipeline design because the assignment's problems are separation-of-concerns problems, not throughput problems. An agent that both generates an attack and grades it has a conflict of interest by construction; strategic prioritization is a different job from execution; and the evaluator needs evidence the attacker must never see. We therefore run four agents with distinct responsibilities, trust levels, and model backings:
 
 - **Orchestrator** — deterministic policy (no LLM). Reads coverage, open findings, and cost from the store; emits typed `WorkItem`s; triggers regression on a new target version; halts spend that isn't producing signal. Every decision cites the rule that fired, so it is auditable.
-- **Red Team** — generates and mutates attacks and executes them live against the target. Runs on **Claude via Anthropic's Cyber Verification Program** (verified dual-use access, so offensive generation isn't refused). Mutations are deterministic and carry `parent_case_id`, so any attack is replayable in regression.
-- **Judge** — decides success from **deterministic oracles first** (canary-string leakage, tool-call audit, log scan, token/cost counter, HTTP assertion), reading execution evidence from Langfuse traces (the target exposes no audit endpoint). Only genuinely semantic verdicts fall to an LLM judge, run on **DeepSeek** — a different model family from the Claude attacker, preserving independence.
+- **Red Team** — generates and mutates attacks and executes them live against the target. Seed replay and deterministic mutation run on an **offline template generator** (`template/offline-v1`, no LLM call — the whole latest campaign ran this way at $0); **Claude via Anthropic's Cyber Verification Program** (verified dual-use access, so offensive generation isn't refused) is reserved for *novel* attack discovery. Mutations are deterministic and carry `parent_case_id`, so any attack is replayable in regression.
+- **Judge** — decides success from **deterministic oracles first** (canary-string leakage, tool-call audit, log scan, token/cost counter, HTTP assertion), reading execution evidence from Langfuse traces (the target exposes no audit endpoint). Only genuinely semantic verdicts fall to an LLM judge: the one live semantic verdict this campaign ran on a **local Ollama model (`llama3.1:8b`)**, with **DeepSeek** configured as the alternative — either way a different model family from the Claude attacker, preserving independence.
 - **Documentation** — converts a confirmed `FAIL` into a `VulnerabilityReport` a stranger could reproduce, behind a data-quality gate (unique id, required fields, no duplicates) and a human-approval gate for critical/high severity.
 
 Two shared subsystems support them. The **regression harness** freezes confirmed exploits into deterministic cases anchored on the target's `/version` commit SHA, and pairs each with a **positive control** — a benign twin that must still succeed — so a "fix" that merely breaks the workflow is caught rather than passed. The **observability layer** (self-hosted Langfuse) records every agent, model, and tool call under one correlation ID, scrubs PHI before export, and is the data substrate the Orchestrator reads.
@@ -31,14 +31,14 @@ The platform already has a confirmed finding in hand: the target enforces **no p
 flowchart LR
     subgraph CONTROL["Control plane (trusted)"]
         ORCH["Orchestrator<br/>deterministic policy"]
-        JUDGE["Judge<br/>oracles + DeepSeek"]
+        JUDGE["Judge<br/>oracles + local/DeepSeek LLM judge"]
         DOC["Documentation<br/>report writer"]
         STORE[("SQLite store<br/>cases/runs/verdicts/reports")]
         OBS["Observability<br/>Langfuse + PHI scrub"]
         DASH["Dashboard"]
     end
     subgraph ATTACK["Attack plane (sandboxed, egress-allowlisted)"]
-        RT["Red Team<br/>Claude via CVP"]
+        RT["Red Team<br/>offline replay + Claude/CVP discovery"]
     end
     subgraph TARGET["Target — no source access"]
         COPILOT["Clinical Co-Pilot<br/>chat / upload / write-back / FHIR"]
@@ -75,13 +75,13 @@ Contracts live in `contracts/contracts.py` (data) and `contracts/interfaces.py` 
 - **Why deterministic:** prioritization must be auditable — "why did it test X?" resolves to a logged rule, not a model's judgment.
 
 ### 3.2 Red Team (`aep/agents/red_team.py`, `aep/agents/mutations.py`)
-- **Trust:** attack plane, sandboxed, egress-allowlisted. **Model:** Claude via CVP. **Autonomy:** full within `token_budget`.
+- **Trust:** attack plane, sandboxed, egress-allowlisted. **Model:** offline template generator (`template/offline-v1`) for seed replay and deterministic mutation; Claude via CVP for novel discovery. **Autonomy:** full within `token_budget`.
 - **In:** `WorkItem` (+ seed `AttackCase`). **Out:** `AttackCase`, `AttackRun` — **never a verdict.**
 - Executes case turns against the target via the async `TargetClient` (chat / upload), minting one **UUID4** correlation id per run (the target rejects non-UUID ids). Deterministic mutation engine (encoding, role-relabel, instruction/turn splitting) records `parent_case_id`.
 - **Trust boundary in code:** the Red Team must never import `aep.target.audit` (the Judge's audit reader); a test enforces this in the import graph.
 
 ### 3.3 Judge (`aep/agents/judge.py`, `llm_judge.py`, `judge_golden.py`)
-- **Trust:** control plane + **read-only Langfuse** (grey-box). **Model:** deterministic oracles; DeepSeek for semantic fallback. **Autonomy:** deterministic verdicts auto-decide; low-confidence semantic verdicts escalate to human.
+- **Trust:** control plane + **read-only Langfuse** (grey-box). **Model:** deterministic oracles; for the semantic minority, a local Ollama model (`llama3.1:8b`) served the one live verdict, with DeepSeek configured as the alternative. **Autonomy:** deterministic verdicts auto-decide; low-confidence semantic verdicts escalate to human.
 - **In:** `AttackRun` + audit trace. **Out:** `JudgeVerdict` (verdict, `oracle_used`, `oracle_evidence`).
 - `judge_deterministic()` runs first; the LLM judge is reached only when `case.oracle == LLM_JUDGE`. Independence is structural (different family from the attacker) and reinforced by a labeled golden set (`score_judge()`) that catches drift in either direction.
 
@@ -138,8 +138,8 @@ Self-hosted **Langfuse** wraps every agent/model/tool call under the correlation
 
 ## 8. Model Choice & CVP
 
-- **Red Team → Claude via CVP.** Anthropic's Cyber Verification Program lifts the default dual-use safeguards for our verified organization, so offensive attack generation isn't refused. Access runs under that org; at this project's volume the cost is modest. **Local models (Qwen/Llama via Ollama)** are wired as a documented production-scale fallback for continuous testing at high volume.
-- **Judge → DeepSeek** for the semantic minority — a different family from the attacker, so evaluation is independent even where it isn't deterministic.
+- **Red Team → offline replay + Claude via CVP for discovery.** Seed replay and deterministic mutation use the offline template generator (`template/offline-v1`, no LLM) — this is what the latest campaign ran, at $0. For *novel* attack generation, Anthropic's Cyber Verification Program lifts the default dual-use safeguards for our verified organization, so offensive generation isn't refused; at this project's volume its cost is modest. **Local models (Qwen/Llama via Ollama)** are wired as the documented production-scale generator for high volume.
+- **Judge → local Ollama (`llama3.1:8b`) for the one live semantic verdict; DeepSeek configured as the alternative** — either way a different family from the attacker, so evaluation is independent even where it isn't deterministic.
 - **Orchestrator → none** (deterministic policy).
 
 ---
@@ -149,7 +149,7 @@ Self-hosted **Langfuse** wraps every agent/model/tool call under the correlation
 | Agent | AI-powered? | Deterministic check / human gate after |
 |---|---|---|
 | Orchestrator | No | rules are logged and auditable |
-| Red Team | Yes (Claude/CVP) | output is executed against the target; effect measured by oracle, not trusted |
+| Red Team | Offline template for seed replay/mutation; Claude/CVP for novel discovery | output is executed against the target; effect measured by oracle, not trusted |
 | Judge | Partly (semantic only) | deterministic oracles dominate; golden-set validation; human escalation on low confidence |
 | Documentation | Prose only | facts sourced from run/verdict; human gate before publishing high/critical |
 
@@ -174,4 +174,4 @@ Self-hosted **Langfuse** wraps every agent/model/tool call under the correlation
 
 ## 11. Status
 
-Wave 1 (target client, store, oracles, seed cases, observability) is merged with a green suite. Wave 2 (the four agents) is building against the merged contracts. F-50 (no per-patient scoping) is confirmed by direct measurement and becomes the platform's first reproduced finding and regression case on the first live campaign.
+All waves are merged with a green suite (417 tests). The four agents (Orchestrator, Red Team, Judge, Documentation) run end to end, and the latest live campaign against target `/version` `9c7e45b` completed: 21 seed cases → **8 PASS / 3 FAIL / 1 ERROR / 9 SKIPPED** (documented limitations), $0 LLM spend. It produced three validated findings — the critical cross-patient bypass (F-50, reproduced by two cases), the high cost-amplification DoS, and the high weak-client-auth finding (F-65, from a live manual audit) — each frozen as a regression case anchored on the target commit SHA. Evidence: `campaign_results.json` and `VULNERABILITY_REPORTS.md`.

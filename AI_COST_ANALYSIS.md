@@ -2,8 +2,8 @@
 
 *Actual development spend and projected production cost at 100 / 1K / 10K / 100K test runs.
 Every dollar anchor below is a **measured** number from `cost_data.json` (the platform's real
-cost instrumentation) and `campaign_results.json` (the final live campaign: 21 cases → 10 pass /
-2 fail / 9 skipped / 0 error, 2 findings). Prices are taken verbatim from `cost_data.json`'s
+cost instrumentation) and `campaign_results.json` (the latest live campaign: 21 cases → 8 pass /
+3 fail / 1 error / 9 skipped, 3 validated findings). Prices are taken verbatim from `cost_data.json`'s
 `router_prices` table; nothing here invents a price. Where a component was not exercised in the
 campaign (the priced semantic judge), its cost is **modeled from the real price table plus a
 stated token assumption**, and labeled as modeled.*
@@ -12,10 +12,11 @@ stated token assumption**, and labeled as modeled.*
 
 ## 1. Actual spend to date
 
-**The final live campaign cost `$0.00`.** `campaign_results.json` reports `cost_usd = 0.0` across
+**The latest live campaign cost `$0.00`.** `campaign_results.json` reports `cost_usd = 0.0` across
 its **12 executed runs** (21 cases; the other 9 are documented-limitation skips that were not
-run). **11 of the 12 decided verdicts** came from a **deterministic oracle** (canary, tool-call
-audit, HTTP assert, rate limit), which makes **no LLM call at all**; the twelfth (`seed-ipi-04`)
+run). Of those 12, **11 reached a verdict** (8 PASS + 3 FAIL) and 1 errored (`seed-authz-03`, no
+readable response). **10 of the 11 decided verdicts** came from a **deterministic oracle** (canary,
+HTTP assert, rate limit), which makes **no LLM call at all**; the eleventh (`seed-ipi-04`)
 was decided by the semantic judge on a **local Ollama model** (`llama3.1:8b`), which has no
 per-token price. The per-run instrumentation in `cost_data.json.campaign` is a snapshot of the
 earlier 19-run campaign, taken before the two DoS cases were added: `total_cost_usd = 0.0` and
@@ -23,11 +24,11 @@ earlier 19-run campaign, taken before the two DoS cases were added: `total_cost_
 (`model: "template/offline-v1"` on all 19 per-run records — no LLM call). The final campaign
 replayed its seeds down the same $0 path.
 
-> **Key efficiency finding:** the platform confirmed **two** vulnerabilities — a **critical**
-> cross-patient PHI bypass (`VULN_b5ebd1d19191`) and a **high** cost-amplification DoS
-> (`VULN_da0a2fea2a20`) — for **$0 in LLM spend**. They were decided by a canary-string match and
-> a rate-limit count respectively, not a model. Deterministic-first judging means the security
-> signal is not only reproducible, it is *free to produce*.
+> **Key efficiency finding:** the platform confirmed its campaign vulnerabilities — the **critical**
+> cross-patient PHI bypass (F-50, `VULN_5d185ba75ac6`, reproduced again as `VULN_3bdd54e50c61`) and
+> the **high** cost-amplification DoS (`VULN_c1146239b086`) — for **$0 in LLM spend**. They were
+> decided by canary-string matches and a rate-limit count, not a model. Deterministic-first judging
+> means the security signal is not only reproducible, it is *free to produce*.
 
 **Measured cost of one real novel generation.** `cost_data.json.sample_generation` is a single
 real frontier attack generation:
@@ -65,7 +66,7 @@ regression suite and CI gate — which re-run the frozen exploit set on every de
 regression is therefore **free to run** regardless of how many times it runs.
 
 **Semantic judge cost (modeled).** The priced LLM-judge path is **DeepSeek** (`deepseek-chat`,
-\$0.28/M in, \$0.42/M out). It was **not** exercised in the final campaign: **0 of the 12 decided
+\$0.28/M in, \$0.42/M out). It was **not** exercised in the latest campaign: **0 of the 11 decided
 verdicts used it**. The one `llm_judge` case (`seed-ipi-04`) was decided by the local Ollama judge
 at \$0, after an earlier campaign's attempt on DeepSeek errored on an upstream **HTTP 402
 billing** failure before spending. So the priced judge's cost is modeled from the price table plus
