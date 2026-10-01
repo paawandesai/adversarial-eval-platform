@@ -67,6 +67,9 @@ DEFAULT_SCOPE = (
 # Refresh this long before the token's stated expiry (OpenEMR: 3600 s).
 _TOKEN_SKEW_SECONDS = 60.0
 
+# What target_version() reports when /version cannot supply a commit SHA.
+UNKNOWN_TARGET_VERSION = "unknown"
+
 CHAT_ROUTES = {
     # The multi-turn follow-up conversation (Week 1 Use Case 3).
     "conversation": "/pre-visit-brief/conversation",
@@ -210,6 +213,7 @@ class TargetClient(TargetClientProtocol):
         self._token_lock: Optional[asyncio.Lock] = None
         self.granted_scope = ""
         self.last_correlation_id: Optional[str] = None
+        self._target_version: Optional[str] = None  # /version commit SHA, once fetched
 
     def __repr__(self) -> str:  # never the token
         return f"TargetClient(base_url={self.config.base_url!r}, role={self.role!r})"
@@ -489,17 +493,25 @@ class TargetClient(TargetClientProtocol):
         """GET /health — liveness, unauthenticated."""
         return await self._call("GET", "/health", authenticated=False)
 
-    async def target_version(self) -> Optional[str]:
+    async def target_version(self) -> str:
         """
-        The target's published API version (openapi.json `info.version`).
+        The commit SHA the deployed target was built from: GET /version
+        (unauthenticated) -> {"commit": "<sha>", "built_at": ...}. This is
+        what AttackRun.target_version records and regression anchors on.
 
-        TODO(target-version): AttackRun.target_version wants a commit SHA,
-        and the target exposes none (no /version route; /health returns only
-        {"status": "alive"}). Until it does, regression anchors on this
-        semver plus the deploy date recorded out of band.
+        Fetched once per client and cached. "unknown" when /version is
+        unreachable or carries no commit; that fallback is not cached, so a
+        later call can still pick up the real SHA.
         """
-        result = await self._call("GET", "/openapi.json", authenticated=False)
+        if self._target_version is not None:
+            return self._target_version
+        try:
+            result = await self._call("GET", "/version", authenticated=False)
+        except TargetTransportError:
+            return UNKNOWN_TARGET_VERSION
         body = result["body"]
-        if result["ok"] and isinstance(body, dict):
-            return (body.get("info") or {}).get("version")
-        return None
+        commit = body.get("commit") if result["ok"] and isinstance(body, dict) else None
+        if not isinstance(commit, str) or not commit.strip():
+            return UNKNOWN_TARGET_VERSION
+        self._target_version = commit.strip()
+        return self._target_version
