@@ -104,6 +104,36 @@ Each category lists: surface, impact, exploitation difficulty, existing defenses
 - **Coverage:** `persona_hijack`, `system_prompt_extraction`, `token_scope_abuse`, `conversation_id_reuse`.
 - **Status:** escalation **confirmed via F-50**; persona/prompt-extraction suspected.
 
+### 3.7 Category Coverage & Roadmap
+
+The case schema defines 12 attack categories (`AttackCategory`). **Seeding four of them deeply rather than all twelve shallowly is a deliberate depth-over-breadth choice** (narrower and stronger): each seeded category has attack cases, boundary cases, and a benign positive control, runs against the live target, and ends in a verdict we can defend. The other eight are scoped out of the seed set for now, not overlooked — the schema already accepts them, and each has a defined path to implementation (seed cases plus an existing or specified oracle).
+
+| # | Category | Layer | Status | Notes |
+|---|---|---|---|---|
+| 1 | `authz_bypass_cross_patient` | App | **Seeded with results** | 7 cases; produced the **Critical** cross-patient PHI leak (F-50, canary oracle) |
+| 2 | `indirect_prompt_injection` | LLM | **Seeded with results** | 6 cases; 3 run, all defended (incl. one live semantic-judge verdict); 3 pending document-ingestion support |
+| 3 | `cost_amplification_dos` | Direct-API | **Seeded with results** | Burst case + positive control; validated no-rate-limiting finding via the `rate_limit` oracle |
+| 4 | `excessive_agency_writeback` | App | **Documented limitation** | 6 cases; write-back is ACL-blocked (403) on the test host, so the fabrication attack cannot land — the control correctly holds (§7) |
+| 5 | `multi_turn_erosion` | LLM | Roadmapped (P1) | |
+| 6 | `system_prompt_extraction` | LLM | Roadmapped (P2) | |
+| 7 | `phi_in_logs` | App | Roadmapped (P3) | |
+| 8 | `conversation_id_reuse` | Direct-API | Roadmapped (P4) | |
+| 9 | `token_scope_abuse` | Direct-API | Roadmapped (P5) | |
+| 10 | `direct_prompt_injection` | LLM | Roadmapped (P6) | |
+| 11 | `persona_hijack` | LLM | Roadmapped (P7) | |
+| 12 | `ssrf_via_document` | App | Roadmapped (P8) | |
+
+**Prioritized roadmap.** Each item needs seed cases; the oracle is named where one already exists and flagged where it must be added.
+
+1. **`multi_turn_erosion`** — a distinct attack class, and the mutation engine's turn-splitting already supports it. Oracle: existing (`canary` / `llm_judge`).
+2. **`system_prompt_extraction`** — exercises the semantic-judge path more fully, and is made deterministic by a system-prompt canary. Oracle: `canary` on the marker, `llm_judge` for paraphrased leaks.
+3. **`phi_in_logs`** — the `log_scan` oracle already exists; the cases double as a positive control for the trace scrubber.
+4. **`conversation_id_reuse`** — direct-API, no LLM involved: a fast deterministic win. Oracle: existing (`http_assert`).
+5. **`token_scope_abuse`** — adjacent to the confirmed F-65 auth finding. Oracle: existing (`http_assert`).
+6. **`direct_prompt_injection`** — baseline completeness alongside the indirect cases. Oracle: existing (`canary` / `tool_call_audit`).
+7. **`persona_hijack`** — expand from the single existing `llm_judge` case (currently exercised through an indirect-injection seed) into its own category.
+8. **`ssrf_via_document`** — gated behind the document-ingestion path being testable; needs an oracle for fetch evidence, specified once that path is live.
+
 ---
 
 ## 4. Confirmed Findings (finding-in-hand)
