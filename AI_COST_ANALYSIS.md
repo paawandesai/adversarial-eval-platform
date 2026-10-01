@@ -2,25 +2,32 @@
 
 *Actual development spend and projected production cost at 100 / 1K / 10K / 100K test runs.
 Every dollar anchor below is a **measured** number from `cost_data.json` (the platform's real
-cost instrumentation) and `campaign_results.json` (the first live 19-seed campaign). Prices are
-taken verbatim from `cost_data.json`'s `router_prices` table; nothing here invents a price.
-Where a component was not exercised in the campaign (the semantic judge), its cost is **modeled
-from the real price table plus a stated token assumption**, and labeled as modeled.*
+cost instrumentation) and `campaign_results.json` (the final live campaign: 21 cases → 10 pass /
+2 fail / 9 skipped / 0 error, 2 findings). Prices are taken verbatim from `cost_data.json`'s
+`router_prices` table; nothing here invents a price. Where a component was not exercised in the
+campaign (the priced semantic judge), its cost is **modeled from the real price table plus a
+stated token assumption**, and labeled as modeled.*
 
 ---
 
 ## 1. Actual spend to date
 
-**The first live campaign cost `$0.00`.** `cost_data.json.campaign` reports `total_cost_usd = 0.0`
-and `total_tokens = 0` across all **19 runs**. Every run's Red Team generation ran on the offline
-template generator (`model: "template/offline-v1"` on all 19 per-run records — no LLM call), and
-every one of the **9 decided verdicts** came from a **deterministic oracle** (canary, tool-call
-audit, HTTP assert), which makes **no LLM call at all**.
+**The final live campaign cost `$0.00`.** `campaign_results.json` reports `cost_usd = 0.0` across
+its **12 executed runs** (21 cases; the other 9 are documented-limitation skips that were not
+run). **11 of the 12 decided verdicts** came from a **deterministic oracle** (canary, tool-call
+audit, HTTP assert, rate limit), which makes **no LLM call at all**; the twelfth (`seed-ipi-04`)
+was decided by the semantic judge on a **local Ollama model** (`llama3.1:8b`), which has no
+per-token price. The per-run instrumentation in `cost_data.json.campaign` is a snapshot of the
+earlier 19-run campaign, taken before the two DoS cases were added: `total_cost_usd = 0.0` and
+`total_tokens = 0`, with Red Team generation on the offline template generator
+(`model: "template/offline-v1"` on all 19 per-run records — no LLM call). The final campaign
+replayed its seeds down the same $0 path.
 
-> **Key efficiency finding:** the platform confirmed a **critical** vulnerability
-> (`VULN_419738a54daa`, cross-patient PHI bypass) for **$0 in LLM spend** — it was decided by a
-> canary-string match, not a model. Deterministic-first judging means the security signal is not
-> only reproducible, it is *free to produce*.
+> **Key efficiency finding:** the platform confirmed **two** vulnerabilities — a **critical**
+> cross-patient PHI bypass (`VULN_ee2ff7e220f0`) and a **high** cost-amplification DoS
+> (`VULN_e1d6aa713505`) — for **$0 in LLM spend**. They were decided by a canary-string match and
+> a rate-limit count respectively, not a model. Deterministic-first judging means the security
+> signal is not only reproducible, it is *free to produce*.
 
 **Measured cost of one real novel generation.** `cost_data.json.sample_generation` is a single
 real frontier attack generation:
@@ -47,7 +54,7 @@ spend, and are not priced here** (the campaign's deterministic path is why `tota
 
 | Component | When it applies | LLM cost |
 | --- | --- | --- |
-| **(a) Deterministic oracle verdict** | canary / tool-call audit / log scan / token counter / HTTP assert — categories with a deterministic oracle | **$0** (no model call) |
+| **(a) Deterministic oracle verdict** | canary / tool-call audit / log scan / token counter / HTTP assert / rate limit — categories with a deterministic oracle | **$0** (no model call) |
 | **(b1) Replay a FROZEN seed / regression case** | regression suite, CI, positive controls, any stored `AttackCase` | **$0** (deterministic mutation/replay, no generation call) |
 | **(b2) Novel Red Team generation** | discovering a *new* attack on a frontier model (Claude via CVP) | **$0.002096 / attack** (measured anchor); **$0** if generated on a local Ollama model |
 | **(c) Semantic LLM judge** | *only* categories with no deterministic oracle (system-prompt extraction, persona hijack, unsafe advice) | **modeled** — see below |
@@ -57,11 +64,12 @@ regression suite and CI gate — which re-run the frozen exploit set on every de
 **deterministic end to end** (stored attack, replayed turns, deterministic oracle). Continuous
 regression is therefore **free to run** regardless of how many times it runs.
 
-**Semantic judge cost (modeled).** The only LLM-judge path is **DeepSeek** (`deepseek-chat`,
-\$0.28/M in, \$0.42/M out). It was **not** exercised in the campaign: **0 of the 9 decided verdicts
-used it**, and the one `llm_judge` case (`seed-ipi-04`) errored on an upstream DeepSeek **HTTP 402
-billing** failure before spending. So its cost is modeled from the price table plus a stated
-assumption:
+**Semantic judge cost (modeled).** The priced LLM-judge path is **DeepSeek** (`deepseek-chat`,
+\$0.28/M in, \$0.42/M out). It was **not** exercised in the final campaign: **0 of the 12 decided
+verdicts used it**. The one `llm_judge` case (`seed-ipi-04`) was decided by the local Ollama judge
+at \$0, after an earlier campaign's attempt on DeepSeek errored on an upstream **HTTP 402
+billing** failure before spending. So the priced judge's cost is modeled from the price table plus
+a stated assumption:
 
 > **Assumption J:** one semantic judgment reads ~2,000 input tokens (transcript + rubric) and
 > emits ~200 output tokens → 2000 × \$0.28/M + 200 × \$0.42/M = **\$0.000644 / semantic verdict**.
@@ -73,11 +81,11 @@ assumption:
 This is **not** cost-per-token × N. It models the *mix* of run types at each scale. The campaign's
 own composition motivates the mix: seeds are **frozen and replayed** (deterministic, $0), only a
 minority of runs generate **novel** attacks, and only categories with no deterministic oracle
-reach the **semantic judge** (1 of 19 seed cases ≈ 5%).
+reach the **semantic judge** (1 of 21 seed cases ≈ 5%).
 
 **Stated assumptions for the mix:**
 - **A1 — semantic-judge share = 5% of all runs**, at every tier (matches the seed composition: 1
-  `llm_judge` case of 19). Cost per semantic verdict = **\$0.000644** (Assumption J).
+  `llm_judge` case of 21). Cost per semantic verdict = **\$0.000644** (Assumption J).
 - **A2 — novel-generation share shrinks as scale grows**, because regression/CI replays of frozen
   cases dominate at scale: **50% → 20% → 10% → 5%** novel at 100 / 1K / 10K / 100K. The remainder
   are $0 deterministic replays.
@@ -155,8 +163,9 @@ dollar tax.
 
 This is the decisive argument for the **local-model execution tier**: local Ollama models (Qwen/
 Llama) do not refuse in-scope offensive generation, have no per-token price, and no external
-rate/billing dependency (the campaign's one LLM-judge call already died on a DeepSeek **HTTP 402
-billing** error — a external-dependency failure mode local models avoid). Reserve the frontier
+rate/billing dependency (an earlier campaign's one LLM-judge call died on a DeepSeek **HTTP 402
+billing** error — an external-dependency failure mode local models avoid; the final campaign ran
+that verdict on local Ollama instead). Reserve the frontier
 model, under CVP, for the low-volume **novel-discovery** work where its capability is worth the
 refusal risk; run everything at volume locally.
 

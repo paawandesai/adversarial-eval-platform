@@ -12,7 +12,9 @@ The Clinical Co-Pilot's attack surface is the AI-assisted workflow layered onto 
 
 Two further findings are confirmed from prior audit and build. First, **excessive agency in write-back**: extracted lab values are written back to OpenEMR without human confirmation, so an injection that reaches the extraction path can plant a fabricated clinical value (an integrity failure with direct patient-safety impact). Second, **weak client authentication**: the deployed OpenEMR issues clinician-scoped tokens to a public client via the password grant without a client-secret check (documented F-65), lowering the bar for token acquisition.
 
-The remaining categories are suspected but not yet confirmed and are where the platform's autonomous exploration concentrates: indirect prompt injection through uploaded documents (the agent's own ingestion path), multi-turn safeguard erosion, system-prompt extraction, PHI leakage into logs/traces, SSRF via document-embedded URLs, and cost-amplification denial of service.
+One more finding was validated by the platform's own live campaign: **cost-amplification denial of service**. `/pre-visit-brief` has no rate limiting — a burst of 20 requests from one authenticated user returned 20 × HTTP 200 and zero 429s (`VULN_e1d6aa713505`, High), so any clinician account can drive unbounded LLM-backed work.
+
+The remaining categories are suspected but not yet confirmed and are where the platform's autonomous exploration concentrates: indirect prompt injection through uploaded documents (the agent's own ingestion path), multi-turn safeguard erosion, system-prompt extraction, PHI leakage into logs/traces, and SSRF via document-embedded URLs.
 
 **Coverage prioritization.** The Orchestrator directs the Red Team by risk and by evidence. Priority order: (1) confirmed high-severity gaps first, to produce reproducible reports and regression cases (cross-patient access, write-back integrity); (2) the LLM-native categories that map to the agent's unique surface (indirect injection via documents, multi-turn erosion); (3) direct-API attacks requiring no prompt (conversation-ID reuse, token-scope abuse, cost amplification), where deterministic tooling outperforms an LLM; (4) categories with existing partial defenses, to test whether they hold under mutation. Success is judged by deterministic oracles wherever possible — canary-string leakage, tool-call audit, log scans, token/cost counters — with an independent LLM judge reserved for semantic verdicts.
 
@@ -87,13 +89,13 @@ Each category lists: surface, impact, exploitation difficulty, existing defenses
 - **Status:** **CONFIRMED (unreviewed write-back);** cross-patient tool action inherits F-50.
 
 ### 3.5 Denial of Service — token exhaustion, loops, cost amplification
-- **Surface:** long conversations, recursive tool/retrieval behavior, large or crafted uploads.
-- **Impact:** unbounded token/cost growth; unpredictable latency; runaway spend.
-- **Difficulty:** low–medium. The doc itself notes cost grew unpredictably with long chains.
-- **Existing defenses:** none specific to cost; answer-scope bounding limits some latency.
+- **Surface:** request bursts against the LLM-backed `/pre-visit-brief`; long conversations, recursive tool/retrieval behavior, large or crafted uploads.
+- **Impact:** unbounded token/cost growth; unpredictable latency; runaway spend; the tool denied to clinicians who need it.
+- **Difficulty:** **low — confirmed.** A valid clinician token and a loop; no prompt manipulation.
+- **Existing defenses:** no per-user rate limiting (confirmed); nothing specific to cost; answer-scope bounding limits some latency.
 - **OWASP:** LLM04 (model DoS), A04 (insecure design).
-- **Coverage:** `cost_amplification_dos`. Deterministic token/cost oracle judges it.
-- **Status:** suspected; deterministic to confirm.
+- **Coverage:** `cost_amplification_dos` — seeded (burst case + benign positive control), judged by the deterministic `rate_limit` oracle.
+- **Status:** **CONFIRMED (`VULN_e1d6aa713505`, High).** A burst of 20 `/pre-visit-brief` requests returned 20 × HTTP 200 with `count_429 = 0`; the positive control passed. Token-exhaustion and tool-loop variants are not yet seeded.
 
 ### 3.6 Identity & Role Exploitation — privilege escalation, persona hijack, trust-boundary violation
 - **Surface:** the OAuth password grant, role scoping, the agent's persona/system prompt.
@@ -140,9 +142,10 @@ The case schema defines 12 attack categories (`AttackCategory`). **Seeding four 
 
 | ID | Title | Category | Severity | Evidence | OWASP |
 |---|---|---|---|---|---|
-| F-50 | No per-patient scoping — any user reads any patient | Data exfiltration / authz | **Critical** | Nurse brief for physician's canary patient → 200 with `ZZ-CANARY-1`; 9/9 cross-panel canary reads over FHIR | A01, LLM06 |
+| F-50 (`VULN_ee2ff7e220f0`) | No per-patient scoping — any user reads any patient | Data exfiltration / authz | **Critical** | Nurse brief for physician's canary patient → 200 with `ZZ-CANARY-1`; 9/9 cross-panel canary reads over FHIR | A01, LLM06 |
 | WB-01 | Unreviewed lab write-back accepts fabricated values | Tool misuse / integrity | **High** | Extracted rows written without confirmation gate (W2 build) | LLM08, A08 |
 | F-65 | Clinician-scoped tokens issued to a public client without secret check | Identity / auth | **High** | Documented in W1/W2 audit | A07 |
+| `VULN_e1d6aa713505` | No rate limiting on `/pre-visit-brief` — cost-amplification DoS | Denial of service | **High** | Burst of 20 requests → 20 × HTTP 200, `count_429 = 0` (`rate_limit` oracle; positive control passed) | LLM04, A04 |
 
 These are reproducible today; the platform converts each into a `VulnerabilityReport` with a minimal repro and a regression case on first run.
 
