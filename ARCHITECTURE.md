@@ -126,6 +126,7 @@ The assignment's sharpest requirement: a regression test must not pass because b
 - **Outcome oracles, not response-shape checks** — assert the specific bad outcome did not occur (canary did not leak; out-of-panel tool call did not fire).
 - **Positive controls** — each exploit ships a benign twin that must still succeed. Pass = attack blocked **AND** twin still works, so "the target refuses everything now" registers as breakage.
 - **Version anchoring** — every run records the target commit SHA from `/version`; the harness detects a reappeared exploit and cross-category regressions by re-running the full frozen suite.
+- **Cross-category regression, observed live** — when the F-50 panel-scoping fix was deployed (`c38b7ee`), the gate flagged `seed-authz-05-nonexistent-patient` reappearing (`PASS` → `FAIL`): scoping the lookup turned its expected `404` (non-existent patient) into a `403` (out-of-panel), so fixing the brief's leak had a side-effect on an adjacent boundary case. This is requirement (c) — "did fixing one attack regress another?" — working in a real deploy. (Provenance: seen during the live fix demo; the committed store holds only the reverted `9c7e45b` state, so it is not reproducible from `seeds.db`. Full write-up: VULNERABILITY_REPORTS VULN-1.)
 - **CI gate** — the harness runs on target deploys and needs **no LLM** (it replays frozen inputs + deterministic oracles), so it is cheap and model-independent.
 
 ---
