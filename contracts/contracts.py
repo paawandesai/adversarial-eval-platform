@@ -96,6 +96,7 @@ class OracleType(str, Enum):
     LOG_SCAN = "log_scan"                # PHI/canary regex hit in traces
     TOKEN_COUNTER = "token_counter"      # cost/token budget exceeded
     HTTP_ASSERT = "http_assert"          # status/field assertion on direct API call
+    RATE_LIMIT = "rate_limit"            # a burst got no throttling (no 429) — no rate limiting
     LLM_JUDGE = "llm_judge"              # semantic verdict — fallback only
 
 
@@ -186,6 +187,10 @@ class AttackRun(BaseModel):
 
     transcript: list[ConversationTurn]  # what actually happened
     tool_calls_observed: list[dict] = Field(default_factory=list)  # from target audit log
+    # Attacker-side record of each request in a burst (cost_amplification_dos):
+    # one dict per request, e.g. {"index": 0, "status_code": 200, "latency_ms": 812.3}.
+    # The RATE_LIMIT oracle reads throttling (429s) off this; empty for non-burst runs.
+    request_results: list[dict] = Field(default_factory=list)
 
     # Observability (engineering req: latency by step, tokens, cost).
     tokens_prompt: int = 0

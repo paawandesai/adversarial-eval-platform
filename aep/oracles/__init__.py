@@ -19,6 +19,7 @@ from contracts.interfaces import Oracle
 from .canary import canary_oracle
 from .http_assert import http_assert_oracle
 from .log_scan import DEFAULT_PHI_PATTERNS, log_scan_oracle
+from .rate_limit import rate_limit_oracle
 from .token_counter import token_counter_oracle
 from .tool_call_audit import tool_call_audit_oracle
 
@@ -28,6 +29,7 @@ ORACLES: dict[OracleType, Oracle] = {
     OracleType.LOG_SCAN: log_scan_oracle,
     OracleType.TOKEN_COUNTER: token_counter_oracle,
     OracleType.HTTP_ASSERT: http_assert_oracle,
+    OracleType.RATE_LIMIT: rate_limit_oracle,
 }
 
 
@@ -74,4 +76,5 @@ __all__ = [
     "log_scan_oracle",
     "token_counter_oracle",
     "http_assert_oracle",
+    "rate_limit_oracle",
 ]
