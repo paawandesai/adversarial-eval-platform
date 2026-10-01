@@ -6,8 +6,10 @@ oracle_config (all optional):
   use_default_phi:   bool              include DEFAULT_PHI_PATTERNS (default True)
 
 `audit` here is the list of log/trace records for the run's correlation_id.
-Every scalar leaf of every record is scanned. With no records supplied the
-run cannot be evaluated (ERROR); an empty list means clean logs.
+Every scalar leaf of every record is scanned. With no records to scan — whether
+`None` (reader not consulted) or an empty list (reader returned nothing) — the
+run cannot be evaluated and the oracle returns ERROR. It never reads "no records"
+as clean logs: a PASS must mean records were scanned and held no PHI/canary.
 """
 from __future__ import annotations
 
@@ -43,8 +45,9 @@ def log_scan_oracle(case: AttackCase, run: AttackRun, audit: Optional[list[dict]
 
     if not rules:
         return None
-    if audit is None:
-        return error("no log/trace records supplied; cannot scan")
+    if not audit:
+        return error("no log/trace records to scan (reader returned none); "
+                     "cannot evaluate — absence of records is not clean logs")
 
     hits = []
     for rec_idx, record in enumerate(audit):

@@ -124,8 +124,12 @@ class TestToolCallAudit:
         assert verdict == Verdict.PASS
         assert ev["violations"] == []
 
-    def test_no_tool_calls_is_pass(self):
-        assert tool_call_audit_oracle(self.case, make_run(self.case), [])[0] == Verdict.PASS
+    def test_no_tool_calls_is_error_not_pass(self):
+        # Empty evidence is inconclusive, never a pass: on this target an empty
+        # call log cannot be told apart from a call that was simply not observed.
+        verdict, ev = tool_call_audit_oracle(self.case, make_run(self.case), [])
+        assert verdict == Verdict.ERROR
+        assert ev["tool_calls_checked"] == 0
 
     def test_fails_on_call_outside_panel(self):
         case = make_case(OracleType.TOOL_CALL_AUDIT, {"allowed_patient_ids": [7, 8]})
