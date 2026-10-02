@@ -65,11 +65,14 @@ paid for it**, using three labels:
 | **Campaign execution** (replay + deterministic oracles) | offline template generator (`template/offline-v1`) + canary / HTTP-assert / rate-limit oracles | none — no model call | **\$0** | **\$0.00** (`campaign_results.json` `cost_usd = 0.0`; `cost_data.json` `total_tokens = 0`) |
 | **Semantic Judge — the one live verdict** (`seed-ipi-04`) | local **Ollama** `llama3.1:8b` | local compute — no API billing | **\$0** | **\$0.00** |
 | **DeepSeek** (configured judge fallback) | one attempted call, rejected with **HTTP 402** (insufficient balance) before any tokens were billed | DeepSeek console | **\$0** | **\$0.00 — confirmed against the DeepSeek console** |
-| **Anthropic metered API** (outside the Max subscription) | the single instrumented `sample_generation` call (`claude-opus-5-5`, 44 in / 96 out) through the router's API-key path | Anthropic console | **MEASURED** | **\$0.002096** at list price — the only metered Anthropic call the instrumentation records (see note) |
+| **Anthropic metered API — this platform** (outside the Max subscription) | the single instrumented `sample_generation` call (`claude-opus-5-5`, 44 in / 96 out) through the router's API-key path | Anthropic console | **MEASURED** | **\$0.002096** at list price — the only metered Anthropic call the instrumentation records (see note) |
+| **Anthropic console total for the period (~\$93)** — *not this platform* | the **Weeks 1–2 Clinical Co-Pilot target's** own operational LLM calls | Anthropic console | **out of scope** | **~\$93, attributed to the target system**, not to the Week 3 adversarial platform (see note) |
 
-**Reconciled total.** Metered LLM spend for the build is **\$0.002096 (MEASURED)** + **\$0**
-DeepSeek + **\$0** Ollama + **\$0** campaign execution — i.e. **under one cent** — on top of the
-**fixed Claude Max subscription**, which absorbed all Red Team generation at zero marginal cost.
+**Reconciled total.** The Week 3 platform's metered LLM spend for the build is **\$0.002096
+(MEASURED)** + **\$0** DeepSeek + **\$0** Ollama + **\$0** campaign execution — i.e. **≈ \$0, under
+one cent** — on top of the **fixed Claude Max subscription**, which absorbed all Red Team
+generation at zero marginal cost. The **~\$93** on the Anthropic console is the Weeks 1–2 target's
+operating cost and is **not** part of that total.
 
 **What this does and does not claim.**
 
@@ -82,12 +85,20 @@ DeepSeek + **\$0** Ollama + **\$0** campaign execution — i.e. **under one cent
   API rate**, even though dev-time generation was subscription-absorbed — a production pipeline
   should be costed at metered rates, so the projections are conservative relative to what the
   build actually paid.
-- **Anthropic console note.** The router reaches Claude only through its metered path
-  (`_call_anthropic`, which requires `ANTHROPIC_API_KEY`), and `.env.example` leaves that key
-  commented out ("only if an agent routes to Claude"); every per-run campaign record shows
-  `template/offline-v1`. The instrumentation therefore bounds metered Anthropic usage at the one
-  sample call above. The Anthropic console total for the build period has **not** been separately
-  reconciled in this document; the expected figure is ≈ \$0.002.
+- **Anthropic console note — the ~\$93 is the target, not this platform.** The Anthropic console
+  shows **~\$93** of metered spend for the build period. That is the **Weeks 1–2 Clinical Co-Pilot
+  target's own operational LLM cost** (the system under test calling Claude to do its job), not
+  spend by the Week 3 adversarial platform. The platform-side evidence is consistent with this:
+  the router reaches Claude only through its metered path (`_call_anthropic`, which requires
+  `ANTHROPIC_API_KEY`), `.env.example` leaves that key commented out ("only if an agent routes to
+  Claude"), and every per-run campaign record shows `template/offline-v1` with
+  `total_tokens = 0`. The platform's instrumentation therefore bounds its own metered Anthropic
+  usage at the one sample call above (**\$0.002096**) — a rounding error against the console
+  figure. The attribution of the ~\$93 to the target is from the account owner's reading of the
+  console; this repo's instrumentation covers the platform's calls only and cannot itemise the
+  target's bill. Inference the target performs while answering this platform's attack traffic is
+  target operating cost and falls inside that figure, consistent with §2 ("target API calls are
+  infrastructure, not LLM spend, and are not priced here").
 - **DeepSeek \$0 is a failure, not a saving.** The 402 means the fallback judge never ran; the
   verdict was produced by the local Ollama judge instead (see §5 on external-billing dependencies).
 
