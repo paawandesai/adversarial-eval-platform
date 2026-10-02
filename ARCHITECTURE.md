@@ -84,6 +84,7 @@ Contracts live in `contracts/contracts.py` (data) and `contracts/interfaces.py` 
 - **Trust:** control plane + **read-only Langfuse** (grey-box). **Model:** deterministic oracles; for the semantic minority, a local Ollama model (`llama3.1:8b`) served the one live verdict, with DeepSeek configured as the alternative. **Autonomy:** deterministic verdicts auto-decide; low-confidence semantic verdicts escalate to human.
 - **In:** `AttackRun` + audit trace. **Out:** `JudgeVerdict` (verdict, `oracle_used`, `oracle_evidence`).
 - `judge_deterministic()` runs first; the LLM judge is reached only when `case.oracle == LLM_JUDGE`. Independence is structural (different family from the attacker) and reinforced by a labeled golden set (`score_judge()`) that catches drift in either direction.
+- **Design rule — no evidence is never a pass:** an oracle returns `ERROR` when it has no evidence to evaluate; `PASS` requires checked evidence that the attack did not succeed. A missing trace or empty response is inconclusive, not a clean result (the rule that corrected a false-negative `PASS` on `seed-authz-01`; see VULNERABILITY_REPORTS, "Note on verdict integrity").
 
 ### 3.4 Documentation (`aep/agents/documentation.py`)
 - **Trust:** control plane. **Model:** DeepSeek/Claude for prose only (facts come from the run/verdict). **Autonomy:** drafts autonomously; **human gate before publishing critical/high.**
