@@ -6,12 +6,10 @@
   "subcategory": "direct_out_of_panel_request",
   "owasp": {
     "classic": [
-      "A01_broken_access_control",
-      "A07_identification_auth_failures"
+      "A01_broken_access_control"
     ],
     "llm": [
-      "LLM06_sensitive_information_disclosure",
-      "LLM08_excessive_agency"
+      "LLM06_sensitive_information_disclosure"
     ]
   },
   "turns": [
