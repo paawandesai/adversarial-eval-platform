@@ -6,7 +6,9 @@ cost instrumentation) and `campaign_results.json` (the latest live campaign: 21 
 3 fail / 1 error / 9 skipped, 3 validated findings). Prices are taken verbatim from `cost_data.json`'s
 `router_prices` table; nothing here invents a price. Where a component was not exercised in the
 campaign (the priced semantic judge), its cost is **modeled from the real price table plus a
-stated token assumption**, and labeled as modeled.*
+stated token assumption**, and labeled as modeled. §1.1 reconciles actual development spend to
+its **billing source** and labels every component **MEASURED**, **SUBSCRIPTION-ABSORBED**, or
+**\$0**.*
 
 ---
 
@@ -44,6 +46,50 @@ This is internally consistent with the price table (44 × \$4/M + 96 × \$20/M =
 the **per-novel-generation anchor** used throughout this document. The campaign itself incurred
 none of this cost because it replayed frozen seeds through the offline generator rather than
 generating novel attacks on a frontier model.
+
+### 1.1 Actual dev spend (reconciled)
+
+The figures above are what the platform's instrumentation recorded. This section ties each cost
+component of the build (commits 2026-09-28 → 2026-10-01) to the **billing source that actually
+paid for it**, using three labels:
+
+- **MEASURED** — token-metered by the router's instrumentation and priced from the price table.
+- **SUBSCRIPTION-ABSORBED** — real model usage, but billed under a flat-rate subscription, so it
+  has no per-token charge and no marginal cost.
+- **\$0** — no billable usage occurred (local model, no model call, or the call failed before
+  anything was billed).
+
+| Cost component | What actually ran | Billing source | Label | Actual spend |
+| --- | --- | --- | --- | --- |
+| **Red Team attack generation (dev)** | Claude, via **Claude Code** authenticated to the CVP-verified claude.ai org | **Claude Max flat-rate subscription** — *not* metered API credits | **SUBSCRIPTION-ABSORBED** | **\$0 marginal.** The fixed Max subscription fee is the actual spend basis; it does not vary with the number of attacks generated |
+| **Campaign execution** (replay + deterministic oracles) | offline template generator (`template/offline-v1`) + canary / HTTP-assert / rate-limit oracles | none — no model call | **\$0** | **\$0.00** (`campaign_results.json` `cost_usd = 0.0`; `cost_data.json` `total_tokens = 0`) |
+| **Semantic Judge — the one live verdict** (`seed-ipi-04`) | local **Ollama** `llama3.1:8b` | local compute — no API billing | **\$0** | **\$0.00** |
+| **DeepSeek** (configured judge fallback) | one attempted call, rejected with **HTTP 402** (insufficient balance) before any tokens were billed | DeepSeek console | **\$0** | **\$0.00 — confirmed against the DeepSeek console** |
+| **Anthropic metered API** (outside the Max subscription) | the single instrumented `sample_generation` call (`claude-opus-5-5`, 44 in / 96 out) through the router's API-key path | Anthropic console | **MEASURED** | **\$0.002096** at list price — the only metered Anthropic call the instrumentation records (see note) |
+
+**Reconciled total.** Metered LLM spend for the build is **\$0.002096 (MEASURED)** + **\$0**
+DeepSeek + **\$0** Ollama + **\$0** campaign execution — i.e. **under one cent** — on top of the
+**fixed Claude Max subscription**, which absorbed all Red Team generation at zero marginal cost.
+
+**What this does and does not claim.**
+
+- **Dev generation was not free in the accounting sense — it was pre-paid.** The honest statement
+  is "\$0 *marginal*, subscription-absorbed", not "\$0". The subscription is a flat fee shared with
+  all other use of the account, so no per-attack dollar figure can be attributed from billing data.
+- **The \$0.002096 anchor is MEASURED, not billed-in-bulk.** It comes from real token counts on one
+  real call (44 × \$4/M + 96 × \$20/M) and is retained as the per-novel-generation price for the
+  projections in §3. Projections deliberately price every frontier generation at this **metered
+  API rate**, even though dev-time generation was subscription-absorbed — a production pipeline
+  should be costed at metered rates, so the projections are conservative relative to what the
+  build actually paid.
+- **Anthropic console note.** The router reaches Claude only through its metered path
+  (`_call_anthropic`, which requires `ANTHROPIC_API_KEY`), and `.env.example` leaves that key
+  commented out ("only if an agent routes to Claude"); every per-run campaign record shows
+  `template/offline-v1`. The instrumentation therefore bounds metered Anthropic usage at the one
+  sample call above. The Anthropic console total for the build period has **not** been separately
+  reconciled in this document; the expected figure is ≈ \$0.002.
+- **DeepSeek \$0 is a failure, not a saving.** The 402 means the fallback judge never ran; the
+  verdict was produced by the local Ollama judge instead (see §5 on external-billing dependencies).
 
 ---
 
